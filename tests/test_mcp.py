@@ -149,3 +149,50 @@ def test_game_isolation(fake_game, monkeypatch):
 
 def test_entry_point_exists():
     assert callable(mcp_server.main)
+
+
+# ---------------------------------------------------------------------------
+# Error paths: the tools answer with error dicts, never tracebacks
+
+
+def test_price_lookup_search_error(fake_game):
+    out = mcp_server.price_lookup("fake", "boom")
+    assert "down" in out["error"]
+    assert out["game"] == "fake"
+
+
+def test_price_lookup_no_matches(monkeypatch, fake_game):
+    monkeypatch.setattr(fake_game, "_hits", [])
+    out = mcp_server.price_lookup("fake", "nothing matches this")
+    assert out["matches"] == 0
+
+
+def test_price_lookup_prices_error(monkeypatch):
+    adapter = FakeAdapter([_hit("Exact Card")])
+
+    def boom(hit):
+        raise SourceError("prices exploded")
+
+    monkeypatch.setattr(adapter, "get_prices", boom)
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": adapter})
+    out = mcp_server.price_lookup("fake", "Exact Card")
+    assert "exploded" in out["error"]
+
+
+def test_main_runs_the_server(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda: calls.append(1))
+    mcp_server.main()
+    assert calls == [1]
+
+
+def test_module_main_guard_runs_server(monkeypatch):
+    """The `python -m topdeck.mcp_server` entry point calls main()."""
+    import runpy
+
+    from mcp.server.mcpserver import MCPServer
+
+    calls = []
+    monkeypatch.setattr(MCPServer, "run", lambda self: calls.append(1))
+    runpy.run_module("topdeck.mcp_server", run_name="__main__", alter_sys=True)
+    assert calls == [1]

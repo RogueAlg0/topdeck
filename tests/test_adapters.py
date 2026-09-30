@@ -276,3 +276,192 @@ def test_tcgcsv_bulk_search_and_prices(no_net):
 def test_tcgcsv_categories():
     assert REGISTRY["onepiece"].category_id == 68
     assert REGISTRY["riftbound"].category_id == 89
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: skips, caps, and unparseable data
+
+
+def test_base_adapter_methods_raise_not_implemented():
+    from topdeck.adapters.base import CardHit, GameAdapter
+
+    adapter = GameAdapter()
+    with pytest.raises(NotImplementedError):
+        adapter.search("bolt")
+    with pytest.raises(NotImplementedError):
+        adapter.get_prices(
+            CardHit(card_id="c", name="n", set_code="s", set_name="s", collector_number="1")
+        )
+
+
+def test_lorcast_skips_sets_without_code(no_net):
+    no_net.routes["https://api.lorcast.com/v0/sets"] = lambda: {
+        "results": [{"name": "No code"}, {"code": "TFC", "name": "The First Chapter"}]
+    }
+    no_net.routes["https://api.lorcast.com/v0/sets/TFC/cards"] = lambda: [
+        {
+            "id": "c1",
+            "name": "Mickey",
+            "version": "",
+            "collector_number": 1,
+            "released_at": "2023-08-18",
+            "prices": {"usd": "2.5"},
+        }
+    ]
+    hits = REGISTRY["lorcana"].search("mickey")
+    assert len(hits) == 1
+    assert hits[0].set_code == "TFC"
+
+
+def test_lorcast_search_caps_at_fifteen(no_net):
+    no_net.routes["https://api.lorcast.com/v0/sets"] = lambda: {
+        "results": [{"code": "TFC", "name": "The First Chapter"}]
+    }
+    no_net.routes["https://api.lorcast.com/v0/sets/TFC/cards"] = lambda: [
+        {
+            "id": f"c{i}",
+            "name": "Mickey Clone",
+            "version": "",
+            "collector_number": i,
+            "released_at": "2023-08-18",
+            "prices": {"usd": "1.0"},
+        }
+        for i in range(20)
+    ]
+    assert len(REGISTRY["lorcana"].search("mickey")) == 15
+
+
+def test_lorcast_unparseable_price_returns_empty():
+    from topdeck.adapters.base import CardHit
+
+    hit = CardHit(
+        card_id="c",
+        name="M",
+        set_code="T",
+        set_name="T",
+        collector_number="1",
+        extra={"usd": "priceless"},
+    )
+    assert REGISTRY["lorcana"].get_prices(hit) == []
+
+
+def test_scryfall_skips_unparseable_price_field():
+    from topdeck.adapters.base import CardHit
+
+    hit = CardHit(
+        card_id="c",
+        name="M",
+        set_code="T",
+        set_name="T",
+        collector_number="1",
+        extra={"prices": {"usd": "N/A", "usd_foil": "3.50"}},
+    )
+    prices = REGISTRY["mtg"].get_prices(hit)
+    assert len(prices) == 1
+    assert prices[0].printing == "foil"
+    assert prices[0].price == 3.5
+
+
+def test_tcgdex_skips_cards_without_detail(no_net):
+    no_net.routes["https://api.tcgdex.net/v2/en/cards?name=pikachu"] = lambda: [
+        {"id": "sv1-1", "name": "Pikachu", "localId": "1"},
+        {"id": "sv1-2", "name": "Pikachu", "localId": "2"},
+    ]
+    no_net.routes["https://api.tcgdex.net/v2/en/cards/sv1-1"] = lambda: {}
+    no_net.routes["https://api.tcgdex.net/v2/en/cards/sv1-2"] = lambda: {
+        "id": "sv1-2",
+        "name": "Pikachu",
+        "localId": "2",
+        "set": {"id": "sv1", "name": "Scarlet", "releaseDate": "2023-01-01"},
+        "pricing": {"cardmarket": {"avg": 1.5, "updated": "2026-01-01"}},
+    }
+    hits = REGISTRY["pokemon"].search("pikachu")
+    assert [h.card_id for h in hits] == ["sv1-2"]
+
+
+def test_tcgcsv_skips_groups_without_id(no_net):
+    cat = 89
+    no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/groups"] = lambda: {
+        "results": [
+            {"name": "No id"},
+            {
+                "groupId": 7,
+                "name": "Origins",
+                "abbreviation": "ORI",
+                "publishedOn": "2025-06-01T00:00:00",
+            },
+        ]
+    }
+    no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/7/products"] = lambda: {
+        "results": [
+            {
+                "productId": 100,
+                "name": "Ahri",
+                "cleanName": "Ahri",
+                "url": "https://www.tcgplayer.com/product/100/x",
+                "extendedData": [{"name": "Number", "value": "001"}],
+            }
+        ]
+    }
+    no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/7/prices"] = lambda: {
+        "results": [
+            {"productId": 100, "marketPrice": 1.75, "midPrice": 2.0, "subTypeName": "Normal"},
+        ]
+    }
+    hits = REGISTRY["riftbound"].search("ahri")
+    assert len(hits) == 1
+    assert hits[0].set_code == "ORI"
+
+
+def test_tcgcsv_search_caps_at_fifteen(no_net):
+    cat = 89
+    no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/groups"] = lambda: {
+        "results": [
+            {
+                "groupId": 7,
+                "name": "Origins",
+                "abbreviation": "ORI",
+                "publishedOn": "2025-06-01T00:00:00",
+            }
+        ]
+    }
+    no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/7/products"] = lambda: {
+        "results": [
+            {
+                "productId": i,
+                "name": f"Ahri Clone {i}",
+                "cleanName": f"Ahri Clone {i}",
+                "url": "https://www.tcgplayer.com/product/x",
+                "extendedData": [],
+            }
+            for i in range(20)
+        ]
+    }
+    no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/7/prices"] = lambda: {"results": []}
+    assert len(REGISTRY["riftbound"].search("ahri")) == 15
+
+
+def test_tcgcsv_skips_unparseable_price_row():
+    from topdeck.adapters.base import CardHit
+
+    hit = CardHit(
+        card_id="100",
+        name="Ahri",
+        set_code="ORI",
+        set_name="Origins",
+        collector_number="001",
+        extra={
+            "prices": [
+                {
+                    "productId": 100,
+                    "marketPrice": "junk",
+                    "midPrice": None,
+                    "subTypeName": "Normal",
+                },
+                {"productId": 100, "marketPrice": 2.5, "midPrice": 2.0, "subTypeName": "Normal"},
+            ]
+        },
+    )
+    prices = REGISTRY["riftbound"].get_prices(hit)
+    assert len(prices) == 1
+    assert prices[0].price == 2.5

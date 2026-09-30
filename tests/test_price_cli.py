@@ -209,3 +209,40 @@ def test_stub_json_output_parses(command, capsys):
 def test_no_command_prints_help(capsys):
     assert main([]) == 0
     assert "usage" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Price-fetch error path and interactivity check
+
+
+def test_price_get_prices_error(capsys, monkeypatch):
+    adapter = FakeAdapter([_hit("Solo")])
+
+    def boom(hit):
+        raise SourceError("prices exploded")
+
+    monkeypatch.setattr(adapter, "get_prices", boom)
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": adapter})
+    assert main(["price", "fake", "solo", "--first"]) == 1
+    assert "Could not fetch prices" in capsys.readouterr().out
+
+
+def test_is_interactive_needs_both_streams(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    assert topdeck.cli._is_interactive() is False
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert topdeck.cli._is_interactive() is True
+
+
+def test_cli_module_main_guard(monkeypatch):
+    """The `python -m topdeck.cli` entry point exits via main()."""
+    import runpy
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["topdeck", "--help"])
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_module("topdeck.cli", run_name="__main__", alter_sys=True)
+    assert exc.value.code == 0

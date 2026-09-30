@@ -135,3 +135,71 @@ def test_check_sources_marks_down_below_threshold(monkeypatch):
     monkeypatch.setattr(doctor, "_probe", _down)
     results = doctor.check_sources()
     assert all(r.status == "down" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Local state summaries: honest about what they cannot read
+
+
+def test_cache_summary_no_cache_yet(monkeypatch):
+    monkeypatch.setattr(doctor.os.path, "exists", lambda p: False)
+    assert doctor._cache_summary() == "no cache yet"
+
+
+def test_cache_summary_without_db_reports_size(tmp_path, monkeypatch):
+    from topdeck import net as net_mod
+
+    cache_file = tmp_path / "http_cache.sqlite"
+    cache_file.write_bytes(b"x" * 2048)
+    monkeypatch.setattr(net_mod, "_cache_path", lambda: str(cache_file))
+    monkeypatch.setattr(net_mod, "_db", lambda: None)
+    assert doctor._cache_summary() == "2 KB on disk"
+
+
+def test_cache_summary_counts_entries(tmp_path, monkeypatch):
+    from topdeck import net as net_mod
+
+    cache_file = tmp_path / "http_cache.sqlite"
+    monkeypatch.setattr(net_mod, "_cache_path", lambda: str(cache_file))
+    conn = net_mod._db()
+    assert conn is not None
+    conn.execute(
+        "INSERT INTO http_cache (url, fetched_at, body) VALUES (?, ?, ?)",
+        ("https://example.invalid/x", 0.0, "{}"),
+    )
+    conn.commit()
+    conn.close()
+    summary = doctor._cache_summary()
+    assert "1 entries" in summary
+    assert "KB on disk" in summary
+
+
+def test_cache_summary_unreadable_file(monkeypatch, tmp_path):
+    from topdeck import net as net_mod
+
+    cache_file = tmp_path / "http_cache.sqlite"
+    cache_file.write_bytes(b"x")
+
+    def boom(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(net_mod, "_cache_path", lambda: str(cache_file))
+    monkeypatch.setattr(doctor.os.path, "getsize", boom)
+    assert doctor._cache_summary() == "unreadable"
+
+
+def test_watch_summary_store_unreadable(monkeypatch):
+    def boom():
+        raise OSError("locked")
+
+    monkeypatch.setattr(doctor, "WatchStore", boom)
+    assert doctor._watch_summary() == "unreadable"
+
+
+def test_watch_summary_count_failure(monkeypatch):
+    class BadStore:
+        def count(self):
+            raise RuntimeError("corrupt")
+
+    monkeypatch.setattr(doctor, "WatchStore", lambda: BadStore())
+    assert doctor._watch_summary() == "unreadable"

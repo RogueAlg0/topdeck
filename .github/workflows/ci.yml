@@ -38,9 +38,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: uv pip install --system -e . pytest
+        # Shuffle the deck: coverage stays honest on every Python we ship.
+        run: uv pip install --system -e . pytest pytest-cov
       - name: Tests
-        run: pytest -q
+        run: pytest -q --cov=topdeck --cov-report=term-missing --cov-fail-under=100
 
   # Reveal the docs: the site must build cleanly.
   reveal:

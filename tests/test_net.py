@@ -128,3 +128,71 @@ def test_user_agent_is_identifying(isolated, monkeypatch):
     monkeypatch.setattr(net.urllib.request, "urlopen", fake_open)
     net.fetch_json("https://x.test/a", ttl=0)
     assert seen[0] and "topdeck" in seen[0] and "python" not in seen[0].lower()
+
+
+# ---------------------------------------------------------------------------
+# Cache failure paths: degrade, never crash
+
+
+def test_db_returns_none_when_cache_dir_unwritable(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    def boom(path, exist_ok=False):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(net.os, "makedirs", boom)
+    assert net._db() is None
+
+
+def test_read_cache_without_db_returns_none(monkeypatch):
+    monkeypatch.setattr(net, "_db", lambda: None)
+    assert net._read_cache("https://x.test/a", 60) is None
+
+
+def test_read_cache_garbled_body_returns_none(isolated):
+    import time
+
+    conn = net._db()
+    conn.execute(
+        "INSERT INTO http_cache (url, fetched_at, body) VALUES (?, ?, ?)",
+        ("https://x.test/a", time.time(), "not json{{"),
+    )
+    conn.commit()
+    conn.close()
+    assert net._read_cache("https://x.test/a", 3600) is None
+
+
+def test_write_cache_without_db_is_quiet(monkeypatch):
+    monkeypatch.setattr(net, "_db", lambda: None)
+    net._write_cache("https://x.test/a", "{}")
+
+
+def test_fetch_json_429_asks_to_slow_down(monkeypatch, isolated):
+    import urllib.error
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", boom)
+    with pytest.raises(net.SourceError, match="slow down"):
+        net.fetch_json("https://x.test/a", ttl=0)
+
+
+def test_fetch_json_http_error_names_status(monkeypatch, isolated):
+    import urllib.error
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 500, "Server Error", {}, None)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", boom)
+    with pytest.raises(net.SourceError, match="HTTP 500"):
+        net.fetch_json("https://x.test/a", ttl=0)
+
+
+def test_fetch_json_garbled_body(monkeypatch, isolated):
+    def fake_open(req, timeout=None):
+        return _Resp(b"not json{{")
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", fake_open)
+    with pytest.raises(net.SourceError, match="garbled"):
+        net.fetch_json("https://x.test/a", ttl=0)

@@ -458,3 +458,219 @@ def test_check_human_table_shows_target_hit(store, fake, capsys):
     store.add("mtg", "card-1", "Lightning Bolt", "Alpha", 2.0)
     assert main(["check"]) == 0
     assert "TARGET HIT" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Watch store location: XDG data dir with honest fallbacks
+
+
+def test_default_path_honors_override(monkeypatch, tmp_path):
+    import os
+
+    from topdeck.watch import _default_path
+
+    monkeypatch.setenv("TOPDECK_DATA_DIR", str(tmp_path))
+    assert _default_path() == os.path.join(str(tmp_path), "watchlist.sqlite")
+
+
+def test_default_path_honors_xdg_data_home(monkeypatch, tmp_path):
+    import os
+
+    from topdeck.watch import _default_path
+
+    monkeypatch.delenv("TOPDECK_DATA_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert _default_path() == os.path.join(str(tmp_path), "topdeck", "watchlist.sqlite")
+
+
+def test_default_path_falls_back_to_dot_topdeck(monkeypatch, tmp_path):
+    import os
+
+    from topdeck.watch import _default_path
+
+    monkeypatch.delenv("TOPDECK_DATA_DIR", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    real_makedirs = os.makedirs
+
+    def boom(path, exist_ok=False):
+        if "topdeck" in path and ".topdeck" not in path:
+            raise OSError("read-only")
+        return real_makedirs(path, exist_ok=exist_ok)
+
+    monkeypatch.setattr(os, "makedirs", boom)
+    assert _default_path() == os.path.join(str(tmp_path), ".topdeck", "watchlist.sqlite")
+
+
+def test_default_path_returns_first_when_nothing_writable(monkeypatch, tmp_path):
+    import os
+
+    from topdeck.watch import _default_path
+
+    monkeypatch.delenv("TOPDECK_DATA_DIR", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def boom(path, exist_ok=False):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(os, "makedirs", boom)
+    assert _default_path().endswith(os.path.join("topdeck", "watchlist.sqlite"))
+
+
+# ---------------------------------------------------------------------------
+# CLI: watch add search and pick paths
+
+
+def test_watch_add_search_source_error(store, fake, capsys):
+    fake.fail_search = "source is down"
+    assert main(["watch", "add", "mtg", "Bolt", "--first"]) == 1
+    assert "Could not look that up" in capsys.readouterr().out
+
+
+def test_watch_add_search_empty(store, fake, capsys):
+    fake.hits = []
+    assert main(["watch", "add", "mtg", "zzz", "--first"]) == 0
+    assert "No matches" in capsys.readouterr().out
+
+
+def test_watch_add_pick_selects_numbered_match(store, fake):
+    fake.hits = [_hit("card-1", "Bolt", "Alpha"), _hit("card-2", "Bolt", "Beta")]
+    assert main(["watch", "add", "mtg", "Bolt", "--pick", "2"]) == 0
+    assert store.find("mtg", "card-2") is not None
+
+
+def test_watch_add_pick_out_of_range(store, fake, capsys):
+    fake.hits = [_hit("card-1", "Bolt", "Alpha"), _hit("card-2", "Bolt", "Beta")]
+    assert main(["watch", "add", "mtg", "Bolt", "--pick", "9"]) == 2
+    assert "out of range" in capsys.readouterr().out
+
+
+def test_watch_add_first_takes_recommended(store, fake):
+    fake.hits = [_hit("card-1", "Bolt", "Alpha"), _hit("card-2", "Bolt", "Beta")]
+    assert main(["watch", "add", "mtg", "Bolt", "--first"]) == 0
+    assert store.find("mtg", "card-1") is not None
+
+
+def test_watch_add_interactive_walkaway(store, fake, monkeypatch):
+    fake.hits = [_hit("card-1", "Bolt", "Alpha"), _hit("card-2", "Bolt", "Beta")]
+    monkeypatch.setattr("topdeck.cli._is_interactive", lambda: True)
+
+    def boom(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", boom)
+    assert main(["watch", "add", "mtg", "Bolt"]) == 1
+
+
+def test_watch_add_interactive_pick_selects(store, fake, monkeypatch):
+    fake.hits = [_hit("card-1", "Bolt", "Alpha"), _hit("card-2", "Bolt", "Beta")]
+    monkeypatch.setattr("topdeck.cli._is_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "2")
+    assert main(["watch", "add", "mtg", "Bolt"]) == 0
+    assert store.find("mtg", "card-2") is not None
+
+
+def test_watch_add_integrity_error_treated_as_watched(store, fake, monkeypatch, capsys):
+    # Simulates losing a DB race with another process: the row exists, but
+    # our own insert raised IntegrityError. The CLI must recover gracefully.
+    fake.hits = [_hit()]
+    real_add = WatchStore.add
+    state = {"raced": False}
+
+    def raced_add(self, *args, **kwargs):
+        if not state["raced"]:
+            state["raced"] = True
+            real_add(self, *args, **kwargs)
+            raise sqlite3.IntegrityError("lost the race")
+        return real_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(WatchStore, "add", raced_add)
+    assert main(["watch", "add", "mtg", "Bolt", "--first"]) == 0
+    assert "already on your watchlist" in capsys.readouterr().out
+    assert store.find("mtg", "card-1") is not None
+
+
+def test_watch_add_integrity_error_json(store, fake, monkeypatch, capsys):
+    fake.hits = [_hit()]
+    real_add = WatchStore.add
+    state = {"raced": False}
+
+    def raced_add(self, *args, **kwargs):
+        if not state["raced"]:
+            state["raced"] = True
+            real_add(self, *args, **kwargs)
+            raise sqlite3.IntegrityError("lost the race")
+        return real_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(WatchStore, "add", raced_add)
+    assert main(["--json", "watch", "add", "mtg", "Bolt", "--first"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "already_on_watchlist"
+    assert payload["watches"][0]["card_id"] == "card-1"
+
+
+def test_watch_remove_json(store, fake, capsys):
+    fake.hits = [_hit()]
+    assert main(["watch", "add", "mtg", "Bolt", "--first"]) == 0
+    capsys.readouterr()
+    assert main(["--json", "watch", "remove", "1"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "removed"
+
+
+# ---------------------------------------------------------------------------
+# CLI: check error and quiet paths
+
+
+def test_check_unknown_game_is_error_row(store, fake, capsys):
+    store.add("bogus", "c1", "Mystery Card", "Set")
+    assert main(["--json", "check"]) == 0
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert "unknown game" in row["error"]
+
+
+def test_check_card_no_longer_listed(store, fake, capsys):
+    fake.hits = []
+    store.add("mtg", "card-1", "Lightning Bolt", "Alpha")
+    assert main(["--json", "check"]) == 0
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert "no longer listed" in row["error"]
+
+
+def test_check_prices_error_row(store, fake, capsys):
+    fake.hits = [_hit()]
+    fake.fail_prices = "prices exploded"
+    store.add("mtg", "card-1", "Lightning Bolt", "Alpha")
+    assert main(["--json", "check"]) == 0
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert "exploded" in row["error"]
+
+
+def test_check_no_prices_note(store, fake, capsys):
+    fake.hits = [_hit()]
+    fake.prices = {}
+    store.add("mtg", "card-1", "Lightning Bolt", "Alpha")
+    assert main(["--json", "check"]) == 0
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert row["note"] == "no prices right now"
+
+
+def test_check_json_empty_watchlist(store, capsys):
+    assert main(["--json", "check"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"] == []
+    assert payload["alert_only"] is False
+
+
+def test_check_quiet_day_prints_plain_summary(store, fake, capsys):
+    fake.hits = [_hit()]
+    fake.prices = {"card-1": [_price(1.00)]}
+    store.add("mtg", "card-1", "Lightning Bolt", "Alpha")
+    assert main(["check"]) == 0
+    capsys.readouterr()
+    assert main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "Checked 1 watched card." in out
+    assert "need attention" not in out
