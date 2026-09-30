@@ -133,8 +133,11 @@ class TcgcsvBulkAdapter(GameAdapter):
         out: list[Price] = []
         for row in hit.extra.get("prices", []):
             raw = row.get("marketPrice")
+            provenance = "market"
             if raw is None:
+                # No market price: fall back to the mid price, but say so.
                 raw = row.get("midPrice")
+                provenance = "mid"
             if raw is None:
                 continue
             try:
@@ -152,6 +155,7 @@ class TcgcsvBulkAdapter(GameAdapter):
                     as_of=as_of,
                     source="tcgcsv",
                     source_url="https://tcgcsv.com",
+                    provenance=provenance,
                 )
             )
         return out

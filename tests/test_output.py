@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from rich.console import Console
 
@@ -14,8 +15,12 @@ from topdeck.output import (
     _money,
     _relative_as_of,
     _signal_text,
+    batch_json,
+    batch_table,
     candidate_table,
     check_table,
+    grand_total_lines,
+    json_payload,
     linked,
     price_table,
     print_result,
@@ -39,7 +44,7 @@ def _hit(name="Bolt", set_name="Alpha"):
     )
 
 
-def _price(value=1.23, currency="USD"):
+def _price(value=1.23, currency="USD", provenance="market"):
     return Price(
         market="tcgplayer",
         currency=currency,
@@ -49,6 +54,7 @@ def _price(value=1.23, currency="USD"):
         as_of="2026-09-30T00:00:00",
         source="fakesource",
         source_url="https://example.com/source",
+        provenance=provenance,
     )
 
 
@@ -254,3 +260,143 @@ def test_check_table_error_row():
     out = console.export_text()
     assert "error" in out
     assert "n/a" in out
+
+
+# ---------------------------------------------------------------------------
+# Price provenance and decklist batch rendering
+
+
+_UNSET = object()
+
+
+def _batch_line(query="Bolt", quantity=4, hit=_UNSET, unit=_UNSET, error=None, note=None):
+    hit = _hit() if hit is _UNSET else hit
+    unit = _price(2.5) if unit is _UNSET else unit
+    total = quantity * unit.price if unit is not None and unit.price is not None else None
+    return SimpleNamespace(
+        query=query,
+        quantity=quantity,
+        hit=hit,
+        prices=[unit] if unit is not None else [],
+        unit=unit,
+        line_total=total,
+        error=error,
+        note=note,
+    )
+
+
+def test_price_table_labels_mid_provenance():
+    console = _console()
+    console.print(price_table(_hit(), [_price(provenance="mid")]))
+    out = console.export_text()
+    assert "tcgplayer mid" in out
+
+
+def test_price_table_market_provenance_has_no_suffix():
+    console = _console()
+    console.print(price_table(_hit(), [_price()]))
+    out = console.export_text()
+    assert "tcgplayer mid" not in out
+    assert "tcgplayer" in out
+
+
+def test_json_price_dict_carries_provenance():
+    payload = json.loads(
+        json_payload(
+            game="fake",
+            query="bolt",
+            chosen=_hit(),
+            prices=[_price(provenance="mid")],
+            alternatives=[],
+            recommended=True,
+        )
+    )
+    assert payload["result"]["prices"][0]["provenance"] == "mid"
+
+
+def test_batch_table_rows_and_totals():
+    console = _console()
+    lines = [
+        _batch_line(),
+        _batch_line(
+            query="Missing",
+            quantity=1,
+            hit=None,
+            unit=None,
+            error="No matches. Try a shorter query or check the spelling.",
+        ),
+    ]
+    console.print(batch_table(lines))
+    out = console.export_text()
+    assert "4x" in out
+    assert "Bolt" in out
+    assert "$2.50" in out
+    assert "$10.00" in out
+    assert "No matches" in out
+    assert "n/a" in out
+
+
+def test_batch_table_no_prices_row():
+    console = _console()
+    line = _batch_line(query="Empty", quantity=2, hit=_hit("Empty"), unit=None)
+    console.print(batch_table([line]))
+    assert "no prices right now" in console.export_text()
+
+
+def test_batch_table_note_and_bare_hit():
+    console = _console()
+    bare = CardHit(card_id="c9", name="Bare", set_code="", set_name="", collector_number="", url="")
+    line = _batch_line(query="Bare", quantity=1, hit=bare, note='2 matches; using top hit "Bare".')
+    console.print(batch_table([line]))
+    out = console.export_text()
+    assert "top hit" in out
+
+
+def test_batch_table_mid_unit_label():
+    console = _console()
+    console.print(batch_table([_batch_line(unit=_price(2.5, provenance="mid"))]))
+    assert "tcgplayer mid" in console.export_text()
+
+
+def test_grand_total_lines_per_currency():
+    console = _console()
+    for text in grand_total_lines({"USD": 12.0, "EUR": 0.8}):
+        console.print(text)
+    out = console.export_text()
+    assert "Grand total: $12.00" in out
+    assert "Grand total: \u20ac0.80" in out
+
+
+def test_batch_json_shape():
+    payload = json.loads(
+        batch_json(
+            game="fake",
+            lines=[
+                _batch_line(),
+                _batch_line(query="Missing", quantity=1, hit=None, unit=None, error="No matches."),
+            ],
+            grand_total={"USD": 10.0},
+            warnings=["line 2: skipped"],
+        )
+    )
+    assert payload["command"] == "price"
+    assert payload["mode"] == "batch"
+    assert payload["game"] == "fake"
+    assert len(payload["lines"]) == 2
+    first = payload["lines"][0]
+    assert first["query"] == "Bolt"
+    assert first["quantity"] == 4
+    assert first["card"]["name"] == "Bolt"
+    assert first["unit_price"]["price"] == 2.5
+    assert first["unit_price"]["provenance"] == "market"
+    assert len(first["prices"]) == 1
+    assert first["line_total"] == 10.0
+    assert first["line_currency"] == "USD"
+    assert first["error"] is None
+    second = payload["lines"][1]
+    assert second["card"] is None
+    assert second["unit_price"] is None
+    assert second["line_total"] is None
+    assert second["line_currency"] is None
+    assert payload["grand_total"] == {"USD": 10.0}
+    assert payload["warnings"] == ["line 2: skipped"]
