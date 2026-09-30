@@ -1,0 +1,98 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          uv pip install --system build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Trusted publishing (OIDC): configure the `topdeck` PyPI project
+        # with this repo as a trusted publisher. No tokens in secrets.
+
+  deb:
+    name: Build and attach .deb
+    runs-on: ubuntu-latest
+    needs: pypi
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel and vendor dependencies
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          uv pip install --system build
+          python -m build --wheel --outdir dist/
+          mkdir -p debroot/usr/lib/topdeck/dist vendor
+          cp dist/topdeck-${VER}-py3-none-any.whl debroot/usr/lib/topdeck/dist/
+          uv pip download --dest vendor/ "rich>=13"
+          cp vendor/*.whl debroot/usr/lib/topdeck/dist/
+      - name: Assemble .deb
+        run: |
+          mkdir -p debroot/DEBIAN debroot/usr/bin
+          cat > debroot/DEBIAN/control <<EOF
+          Package: topdeck
+          Version: ${VER}
+          Section: utils
+          Priority: optional
+          Architecture: all
+          Maintainer: RogueAlg0
+          Depends: python3, python3-venv
+          Description: Terminal-native TCG price watcher
+           Track your cards, catch the spikes, never pay full price
+           for cardboard.
+          EOF
+          cat > debroot/DEBIAN/postinst <<'EOF'
+          #!/bin/sh
+          set -e
+          python3 -m venv /usr/lib/topdeck/venv
+          /usr/lib/topdeck/venv/bin/pip install --no-index --find-links=/usr/lib/topdeck/dist /usr/lib/topdeck/dist/topdeck-*.whl
+          EOF
+          chmod 755 debroot/DEBIAN/postinst
+          cat > debroot/DEBIAN/prerm <<'EOF'
+          #!/bin/sh
+          set -e
+          rm -rf /usr/lib/topdeck
+          EOF
+          chmod 755 debroot/DEBIAN/prerm
+          cat > debroot/usr/bin/topdeck <<'EOF'
+          #!/bin/sh
+          exec /usr/lib/topdeck/venv/bin/topdeck "$@"
+          EOF
+          chmod 755 debroot/usr/bin/topdeck
+          dpkg-deb --build debroot "topdeck_${VER}_all.deb"
+          topdeck --version || true
+      - name: Attach .deb to the tag's GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --generate-notes --title "$TAG"
+          fi
+          gh release upload "$TAG" "topdeck_${VER}_all.deb" --clobber
