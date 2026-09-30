@@ -122,6 +122,7 @@ def _tcgcsv_routes(fake, cat):
         ("lorcana", "Elsa", _lorcast_routes),
         ("onepiece", "Hero", lambda f: _tcgcsv_routes(f, 68)),
         ("riftbound", "Hero", lambda f: _tcgcsv_routes(f, 89)),
+        ("yugioh", "Hero", lambda f: _tcgcsv_routes(f, 2)),
     ],
 )
 def test_every_price_answers_five_questions(no_net, game_key, query, route_setup):
@@ -144,14 +145,16 @@ def test_empty_source_block_yields_no_prices_never_guesses(no_net, game_key):
     zeroes, placeholders, or guesses."""
     from dataclasses import replace
 
-    routes = {
-        "mtg": _scryfall_routes,
-        "pokemon": _tcgdex_routes,
-        "lorcana": _lorcast_routes,
-        "onepiece": lambda f: _tcgcsv_routes(f, 68),
-        "riftbound": lambda f: _tcgcsv_routes(f, 89),
-    }
-    routes[game_key](no_net)
+    from topdeck import backbone
+
+    if game_key == "mtg":
+        _scryfall_routes(no_net)
+    elif game_key == "pokemon":
+        _tcgdex_routes(no_net)
+    elif game_key == "lorcana":
+        _lorcast_routes(no_net)
+    else:
+        _tcgcsv_routes(no_net, backbone.CATEGORY_IDS[game_key])
     adapter = REGISTRY[game_key]
     query = {"mtg": "Bolt", "pokemon": "Pika", "lorcana": "Elsa"}.get(game_key, "Hero")
     hits = adapter.search(query)
@@ -160,8 +163,6 @@ def test_empty_source_block_yields_no_prices_never_guesses(no_net, game_key):
         "mtg": {"prices": {}},
         "pokemon": {"pricing": {}},
         "lorcana": {"usd": None},
-        "onepiece": {"prices": []},
-        "riftbound": {"prices": []},
-    }[game_key]
+    }.get(game_key, {"prices": []})
     blank = replace(hits[0], extra=empty_extra)
     assert adapter.get_prices(blank) == []

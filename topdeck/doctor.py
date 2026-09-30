@@ -15,7 +15,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from topdeck import net
+from topdeck import backbone, net
 from topdeck.watch import WatchStore
 
 _TIMEOUT = 5.0
@@ -134,9 +134,28 @@ def _watch_summary() -> str:
     return f"{n} {noun} watched"
 
 
+def _backbone_summary() -> str:
+    """Compact per-game sync state: counts plus any games needing a sync."""
+    states = [(game, backbone.sync_status(game)) for game in backbone.GAMES]
+    fresh = sum(1 for _, status in states if status == "fresh")
+    problems = [
+        f"{game}: {'never synced' if status == 'never' else status}"
+        for game, status in states
+        if status != "fresh"
+    ]
+    summary = f"{fresh}/{len(states)} games fresh"
+    if problems:
+        shown = "; ".join(problems[:5])
+        if len(problems) > 5:
+            shown += f"; +{len(problems) - 5} more"
+        summary += f" ({shown}). Run `topdeck sync` to refresh prices."
+    return summary
+
+
 def local_checks() -> list[tuple[str, str]]:
     """(label, detail) rows for on-machine state."""
     return [
         ("HTTP cache", _cache_summary()),
         ("Watchlist", _watch_summary()),
+        ("TCGCSV sync", _backbone_summary()),
     ]

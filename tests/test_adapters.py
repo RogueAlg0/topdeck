@@ -27,13 +27,19 @@ def no_net(monkeypatch):
     return fake
 
 
-def test_registry_has_five_games_with_trust_tiers():
-    assert set(REGISTRY) == {"mtg", "pokemon", "lorcana", "onepiece", "riftbound"}
+def test_registry_covers_backbone_roster_with_trust_tiers():
+    from topdeck import backbone
+
+    assert set(REGISTRY) == set(backbone.GAMES)
     assert REGISTRY["mtg"].trust_tier == "solid"
     assert REGISTRY["pokemon"].trust_tier == "solid"
     assert REGISTRY["lorcana"].trust_tier == "beta"
     assert REGISTRY["onepiece"].trust_tier == "solid"
     assert REGISTRY["riftbound"].trust_tier == "experimental"
+    dedicated = {"mtg", "pokemon", "lorcana", "onepiece", "riftbound"}
+    for key in set(REGISTRY) - dedicated:
+        assert REGISTRY[key].trust_tier == "beta"
+        assert REGISTRY[key].source_name == "tcgcsv"
 
 
 def test_resolve_game_aliases_and_unknown():
@@ -41,7 +47,8 @@ def test_resolve_game_aliases_and_unknown():
     assert resolve_game("MTG").game_key == "mtg"
     assert resolve_game("magic").game_key == "mtg"
     assert GAME_ALIASES["magic"] == "mtg"
-    assert resolve_game("yugioh") is None
+    assert resolve_game("ygo").game_key == "yugioh"
+    assert resolve_game("atlantis") is None
 
 
 def test_scryfall_search_and_prices(no_net):

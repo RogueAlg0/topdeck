@@ -9,8 +9,8 @@ from __future__ import annotations
 import urllib.parse
 from datetime import datetime, timezone
 
-from topdeck import net
-from topdeck.adapters.base import CardHit, GameAdapter, Price
+from topdeck import backbone, net
+from topdeck.adapters.base import CardHit, GameAdapter, Price, prices_from_cents, with_sidecar_price
 
 # (scryfall field, market, currency, printing)
 _PRICE_FIELDS = (
@@ -55,12 +55,35 @@ class ScryfallAdapter(GameAdapter):
                     finish=finishes[0],
                     released_at=card.get("released_at", "") or "",
                     url=card.get("scryfall_uri", "") or "",
-                    extra={"prices": prices},
+                    extra={
+                        "prices": prices,
+                        # TCGplayer product ID: the join key into the
+                        # backbone sidecar when a sync is fresh.
+                        "tcgplayer_id": card.get("tcgplayer_id"),
+                    },
                 )
             )
         return hits
 
     def get_prices(self, hit: CardHit) -> list[Price]:
+        # Backbone rule: a fresh sync leads with the sidecar's USD price
+        # and the live legs supplement it; a miss or stale data falls
+        # back to Scryfall's prices alone.
+        live = self._live_prices(hit)
+        join_key = hit.extra.get("tcgplayer_id")
+        row = backbone.lookup_price(self.game_key, join_key) if isinstance(join_key, int) else None
+        if row is None:
+            return live
+        sidecar = prices_from_cents(
+            row["market_cents"],
+            row["mid_cents"],
+            as_of=row["as_of"],
+            source="tcgcsv",
+            source_url="https://tcgcsv.com",
+        )
+        return with_sidecar_price(sidecar, live)
+
+    def _live_prices(self, hit: CardHit) -> list[Price]:
         prices = hit.extra.get("prices", {})
         # Scryfall refreshes prices roughly twice a day, so as-of is the
         # moment we fetched, not a live quote.

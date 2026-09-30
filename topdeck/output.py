@@ -475,3 +475,35 @@ def doctor_json(sources, local) -> str:
         },
         indent=2,
     )
+
+
+def sync_table(results) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Game")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for res in results:
+        if res.ok:
+            table.add_row(
+                res.game,
+                "[green]synced[/green]",
+                f"{res.groups} groups, {res.products} products with prices",
+            )
+        else:
+            table.add_row(res.game, "[red]failed[/red]", res.error or "unknown error")
+    return table
+
+
+def sync_json(results) -> str:
+    games = []
+    for res in results:
+        entry: dict = {
+            "game": res.game,
+            "status": "ok" if res.ok else "failed",
+            "groups": res.groups,
+            "products": res.products,
+        }
+        if not res.ok:
+            entry["error"] = res.error
+        games.append(entry)
+    return json.dumps({"command": "sync", "games": games}, indent=2)

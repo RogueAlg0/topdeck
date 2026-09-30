@@ -11,8 +11,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from topdeck import net
-from topdeck.adapters.base import CardHit, GameAdapter, Price
+from topdeck import backbone, net
+from topdeck.adapters.base import CardHit, GameAdapter, Price, prices_from_cents, with_sidecar_price
 from topdeck.progress import Progress
 
 
@@ -74,7 +74,12 @@ class LorcastAdapter(GameAdapter):
                     set_name=str(set_info.get("name", "")),
                     collector_number=str(card.get("collector_number", "")),
                     released_at=str(card.get("released_at", "") or ""),
-                    extra={"usd": prices.get("usd")},
+                    extra={
+                        "usd": prices.get("usd"),
+                        # TCGplayer product ID: the join key into the
+                        # backbone sidecar when a sync is fresh.
+                        "tcgplayer_id": card.get("tcgplayer_id"),
+                    },
                 )
             )
             if len(hits) >= 15:
@@ -82,6 +87,24 @@ class LorcastAdapter(GameAdapter):
         return hits
 
     def get_prices(self, hit: CardHit) -> list[Price]:
+        # Backbone rule: a fresh sync leads with the sidecar's USD price
+        # and the live legs supplement it; a miss or stale data falls
+        # back to Lorcast's price alone.
+        live = self._live_prices(hit)
+        join_key = hit.extra.get("tcgplayer_id")
+        row = backbone.lookup_price(self.game_key, join_key) if isinstance(join_key, int) else None
+        if row is None:
+            return live
+        sidecar = prices_from_cents(
+            row["market_cents"],
+            row["mid_cents"],
+            as_of=row["as_of"],
+            source="tcgcsv",
+            source_url="https://tcgcsv.com",
+        )
+        return with_sidecar_price(sidecar, live)
+
+    def _live_prices(self, hit: CardHit) -> list[Price]:
         raw = hit.extra.get("usd")
         if raw is None:
             return []

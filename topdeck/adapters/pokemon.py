@@ -10,8 +10,15 @@ from __future__ import annotations
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
-from topdeck import net
-from topdeck.adapters.base import CardHit, GameAdapter, Price, rank_candidates
+from topdeck import backbone, net
+from topdeck.adapters.base import (
+    CardHit,
+    GameAdapter,
+    Price,
+    prices_from_cents,
+    rank_candidates,
+    with_sidecar_price,
+)
 from topdeck.progress import Progress
 
 _DETAIL_CAP = 12
@@ -80,7 +87,13 @@ class TcgdexAdapter(GameAdapter):
                     collector_number=str(detail.get("localId", cand.collector_number)),
                     released_at=str(set_info.get("releaseDate", "") or ""),
                     url=f"https://www.tcgplayer.com/product/{product_id}" if product_id else "",
-                    extra={"pricing": pricing, "has_prices": has_prices},
+                    extra={
+                        "pricing": pricing,
+                        "has_prices": has_prices,
+                        # TCGplayer product ID: the join key into the
+                        # backbone sidecar when a sync is fresh.
+                        "product_id": product_id,
+                    },
                 )
             )
         # Promo sets often have no releaseDate, so recency cannot rank them.
@@ -90,6 +103,24 @@ class TcgdexAdapter(GameAdapter):
         return hits
 
     def get_prices(self, hit: CardHit) -> list[Price]:
+        # Backbone rule: a fresh sync leads with the sidecar's USD price
+        # and the live legs supplement it; a miss or stale data falls
+        # back to TCGdex's prices alone.
+        live = self._live_prices(hit)
+        join_key = hit.extra.get("product_id")
+        row = backbone.lookup_price(self.game_key, join_key) if isinstance(join_key, int) else None
+        if row is None:
+            return live
+        sidecar = prices_from_cents(
+            row["market_cents"],
+            row["mid_cents"],
+            as_of=row["as_of"],
+            source="tcgcsv",
+            source_url="https://tcgcsv.com",
+        )
+        return with_sidecar_price(sidecar, live)
+
+    def _live_prices(self, hit: CardHit) -> list[Price]:
         pricing = hit.extra.get("pricing", {})
         out: list[Price] = []
         cardmarket = pricing.get("cardmarket") or {}

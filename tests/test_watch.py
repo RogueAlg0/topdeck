@@ -347,7 +347,7 @@ def test_watch_remove_ambiguous_name_exits_two(store, capsys):
 
 
 def test_watch_add_unknown_game(store, capsys):
-    assert main(["watch", "add", "yugioh", "Blue-Eyes", "--first"]) == 2
+    assert main(["watch", "add", "atlantis", "Blue-Eyes", "--first"]) == 2
 
 
 # ---------------------------------------------------------------------------
