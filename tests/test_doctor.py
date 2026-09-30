@@ -156,6 +156,24 @@ def test_cache_summary_without_db_reports_size(tmp_path, monkeypatch):
     assert doctor._cache_summary() == "2 KB on disk"
 
 
+def test_cache_summary_counts_entries(tmp_path, monkeypatch):
+    from topdeck import net as net_mod
+
+    cache_file = tmp_path / "http_cache.sqlite"
+    monkeypatch.setattr(net_mod, "_cache_path", lambda: str(cache_file))
+    conn = net_mod._db()
+    assert conn is not None
+    conn.execute(
+        "INSERT INTO http_cache (url, fetched_at, body) VALUES (?, ?, ?)",
+        ("https://example.invalid/x", 0.0, "{}"),
+    )
+    conn.commit()
+    conn.close()
+    summary = doctor._cache_summary()
+    assert "1 entries" in summary
+    assert "KB on disk" in summary
+
+
 def test_cache_summary_unreadable_file(monkeypatch, tmp_path):
     from topdeck import net as net_mod
 
