@@ -59,6 +59,11 @@ class GameAdapter:
         """Return current prices for one resolved card."""
         raise NotImplementedError
 
+    def history_key(self, hit: CardHit) -> int | None:
+        """The integer join key into price history, or None when this
+        adapter files none for the hit."""
+        return None
+
 
 def prices_from_cents(
     market_cents: int | None,

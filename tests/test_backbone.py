@@ -665,7 +665,12 @@ def test_sync_cli_alias_resolves(cache_home, fake_net, capsys, monkeypatch):
     assert seen == ["mtg"]
 
 
-def test_sync_cli_all_games_and_failure_exit_code(cache_home, capsys, monkeypatch):
+def test_core_games_are_all_backbone_games():
+    assert set(backbone.CORE_GAMES) <= set(backbone.GAMES)
+    assert backbone.CORE_GAMES == ("mtg", "pokemon", "lorcana", "onepiece", "riftbound")
+
+
+def test_sync_cli_defaults_to_core_games_and_failure_exit_code(cache_home, capsys, monkeypatch):
     seen = []
 
     def fake_sync(game):
@@ -676,10 +681,60 @@ def test_sync_cli_all_games_and_failure_exit_code(cache_home, capsys, monkeypatc
 
     monkeypatch.setattr(backbone, "sync_game", fake_sync)
     assert main(["sync"]) == 1
-    assert seen == list(backbone.GAMES)
+    assert seen == list(backbone.CORE_GAMES)
     out = capsys.readouterr().out
     assert "failed" in out
     assert "boom" in out
+
+
+def test_sync_cli_all_flag_syncs_every_game(cache_home, capsys, monkeypatch):
+    seen = []
+
+    def fake_sync(game):
+        seen.append(game)
+        return SyncResult(game=game, ok=True, groups=1, products=2)
+
+    monkeypatch.setattr(backbone, "sync_game", fake_sync)
+    assert main(["sync", "--all"]) == 0
+    assert seen == list(backbone.GAMES)
+    out = capsys.readouterr().out
+    assert "riftbound" in out
+
+
+def test_sync_cli_all_with_one_game_is_an_error(cache_home, capsys):
+    assert main(["sync", "--all", "pokemon"]) == 2
+    out = capsys.readouterr().out
+    assert "not both" in out
+
+
+def test_sync_cli_all_json_shape(cache_home, capsys, monkeypatch):
+    def fake_sync(game):
+        return SyncResult(game=game, ok=True, groups=1, products=2)
+
+    monkeypatch.setattr(backbone, "sync_game", fake_sync)
+    assert main(["--json", "sync", "--all"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["command"] == "sync"
+    assert len(payload["games"]) == len(backbone.GAMES)
+
+
+def test_sync_help_mentions_all_and_keeps_cron(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["sync", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--all" in out
+    assert "core games" in out
+    assert "cron" in out
+    assert "0 6 * * * topdeck sync" in out
+
+
+def test_sync_game_unknown_game_is_failed_result_not_raise(cache_home):
+    result = backbone.sync_game("atlantis")
+    assert result.ok is False
+    assert result.game == "atlantis"
 
 
 def test_sync_cli_all_games_json_failure_shape(cache_home, capsys, monkeypatch):
@@ -703,3 +758,222 @@ def test_sync_json_ok_shape():
     payload = json.loads(sync_json([SyncResult(game="mtg", ok=True, groups=3, products=10)]))
     assert payload["games"][0]["status"] == "ok"
     assert "error" not in payload["games"][0]
+
+
+# ---------------------------------------------------------------------------
+# First-run auto-sync on `topdeck price`
+
+
+class _FirstRunAdapter:
+    """One-hit fake game with no sync history, so price lookups auto-sync."""
+
+    game_key = "fake"
+    display_name = "Fake Game"
+    trust_tier = "solid"
+    source_name = "fakesource"
+
+    def history_key(self, hit):
+        return None
+
+    def search(self, query):
+        return [
+            CardHit(
+                card_id="1",
+                name="Solo",
+                set_code="S",
+                set_name="Set",
+                collector_number="1",
+                url="https://example.com/card",
+            )
+        ]
+
+    def get_prices(self, hit):
+        return [
+            Price(
+                market="tcgplayer",
+                currency="USD",
+                condition="near-mint",
+                printing="normal",
+                price=1.23,
+                as_of="2026-09-30T00:00:00",
+                source="fakesource",
+                source_url="https://example.com/source",
+            )
+        ]
+
+
+@pytest.fixture
+def first_run_game(monkeypatch):
+    """Fake game with no sync history: its first price lookup auto-syncs."""
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": _FirstRunAdapter()})
+
+
+def _fake_sync_ok(monkeypatch, groups=2, products=5):
+    seen = []
+
+    def fake_sync(game):
+        seen.append(game)
+        return SyncResult(game=game, ok=True, groups=groups, products=products)
+
+    monkeypatch.setattr(backbone, "sync_game", fake_sync)
+    return seen
+
+
+def test_price_auto_syncs_never_synced_game(cache_home, first_run_game, capsys, monkeypatch):
+    seen = _fake_sync_ok(monkeypatch)
+    assert main(["price", "fake", "solo"]) == 0
+    assert seen == ["fake"]
+    captured = capsys.readouterr()
+    assert 'Price data for "fake" was never synced. Syncing it now.' in captured.err
+    assert "Synced fake: 2 groups, 5 products with prices." in captured.err
+    assert "Solo" in captured.out
+
+
+def test_price_auto_sync_silent_under_json(cache_home, first_run_game, capsys, monkeypatch):
+    seen = _fake_sync_ok(monkeypatch)
+    assert main(["--json", "price", "fake", "solo"]) == 0
+    assert seen == ["fake"]
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["game"] == "fake"
+    assert payload["result"]["card"]["name"] == "Solo"
+
+
+def test_price_auto_sync_failure_falls_back(cache_home, first_run_game, capsys, monkeypatch):
+    monkeypatch.setattr(
+        backbone,
+        "sync_game",
+        lambda game: SyncResult(game=game, ok=False, error="boom"),
+    )
+    assert main(["price", "fake", "solo"]) == 0
+    captured = capsys.readouterr()
+    assert "Could not sync fake prices (boom)." in captured.err
+    assert "Using live prices instead." in captured.err
+    assert "Solo" in captured.out
+
+
+def test_price_no_auto_sync_when_already_synced(cache_home, first_run_game, capsys, monkeypatch):
+    _stamp_meta("fake", datetime.now(timezone.utc))
+
+    def fake_sync(game):
+        raise AssertionError("sync must not run for a fresh game")
+
+    monkeypatch.setattr(backbone, "sync_game", fake_sync)
+    assert main(["price", "fake", "solo"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_price_no_auto_sync_when_stale(cache_home, first_run_game, capsys, monkeypatch):
+    # Only "never" triggers. A stale sync serves the live path; it does
+    # not surprise anyone with a bulk download.
+    _stamp_meta("fake", datetime.now(timezone.utc) - timedelta(hours=40))
+
+    def fake_sync(game):
+        raise AssertionError("sync must not run for a stale game")
+
+    monkeypatch.setattr(backbone, "sync_game", fake_sync)
+    assert main(["price", "fake", "solo"]) == 0
+    assert "never synced" not in capsys.readouterr().err
+
+
+def test_price_batch_auto_syncs_never_synced_game(
+    cache_home, first_run_game, tmp_path, capsys, monkeypatch
+):
+    _fake_sync_ok(monkeypatch)
+    deck = tmp_path / "deck.txt"
+    deck.write_text("1 Solo\n")
+    assert main(["price", "fake", "--file", str(deck)]) == 0
+    captured = capsys.readouterr()
+    assert "never synced" in captured.err
+    assert "Solo" in captured.out
+
+
+def test_sync_builds_trigram_search_index(cache_home, fake_net):
+    from topdeck import trigrams
+
+    _riftbound_routes(fake_net)
+    backbone.sync_game("riftbound")
+    suggestions = trigrams.suggest(backbone.db_path(), "riftbound", "Test Card Alpah")
+    assert suggestions
+    assert suggestions[0].name == "Test Card Alpha"
+    assert suggestions[0].join_key == 101
+    assert suggestions[0].set_name == "Set One"
+    assert suggestions[0].set_code == "S1"
+    # Products with no usable prices never enter the index either.
+    conn = sqlite3.connect(backbone.db_path())
+    try:
+        indexed = {
+            row[0] for row in conn.execute("SELECT name FROM names WHERE game = 'riftbound'")
+        }
+    finally:
+        conn.close()
+    assert "Priceless Card" not in indexed
+    assert "Worthless Card" not in indexed
+
+
+def test_sync_replaces_trigram_index_without_duplicates(cache_home, fake_net):
+    _riftbound_routes(fake_net)
+    backbone.sync_game("riftbound")
+    backbone.sync_game("riftbound")
+
+    def _counts():
+        conn = sqlite3.connect(backbone.db_path())
+        try:
+            names = conn.execute("SELECT COUNT(*) FROM names WHERE game = 'riftbound'").fetchone()[
+                0
+            ]
+            postings = conn.execute(
+                "SELECT COUNT(*) FROM postings WHERE game = 'riftbound'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        return names, postings
+
+    assert _counts() == (5, _counts()[1])
+    assert _counts()[1] > 0
+
+
+def test_schema_v4_has_search_tables(cache_home):
+    conn = backbone._connect()
+    try:
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        conn.close()
+    assert {"prices", "names", "postings"} <= tables
+
+
+def test_tcgcsv_search_trigram_fallback_on_typo(cache_home, fake_net):
+    _riftbound_routes(fake_net)
+    backbone.sync_game("riftbound")
+    adapter = REGISTRY["riftbound"]
+    hits = adapter.search("Test Card Alpah")
+    assert hits
+    assert hits[0].name == "Test Card Alpha"
+    assert hits[0].card_id == "101"
+    assert hits[0].set_name == "Set One"
+    # The fallback hit resolves prices through the normal backbone path.
+    prices = adapter.get_prices(hits[0])
+    assert [p.price for p in prices] == [1.50]
+    assert prices[0].provenance == "market"
+
+
+def test_tcgcsv_search_exact_path_ignores_trigram_index(cache_home, fake_net):
+    _riftbound_routes(fake_net)
+    backbone.sync_game("riftbound")
+    adapter = REGISTRY["riftbound"]
+    hits = adapter.search("Test Card Alpha")
+    assert hits
+    assert hits[0].card_id == "101"
+    # Exact path: the live price rows ride along in extra, which the
+    # trigram fallback never provides.
+    assert hits[0].extra.get("prices")
+
+
+def test_tcgcsv_search_trigram_fallback_needs_no_sync(cache_home, fake_net):
+    # No sync, no index, no crash: the typo just finds nothing.
+    _riftbound_routes(fake_net)
+    adapter = REGISTRY["riftbound"]
+    assert adapter.search("Test Card Alpah") == []

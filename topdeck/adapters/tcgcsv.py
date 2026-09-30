@@ -15,11 +15,32 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from topdeck import backbone, net
+from topdeck import backbone, net, trigrams
 from topdeck.adapters.base import CardHit, GameAdapter, Price, prices_from_cents, with_sidecar_price
 from topdeck.progress import Progress
 
 _PRINTING_BY_SUBTYPE = {"Normal": "normal", "Foil": "foil"}
+
+
+def _trigram_hits(game_key: str, query: str) -> list[CardHit]:
+    """Typo-tolerant fallback: CardHits built from the synced name index.
+
+    The productId doubles as the card_id, so get_prices resolves these
+    through the normal backbone path, freshness rule included.
+    """
+    return [
+        CardHit(
+            card_id=str(suggestion.join_key),
+            name=suggestion.name,
+            set_code=suggestion.set_code,
+            set_name=suggestion.set_name,
+            collector_number="",
+            released_at="",
+            url="",
+        )
+        for suggestion in trigrams.suggest(backbone.db_path(), game_key, query, limit=10)
+    ]
+
 
 # Threads for bulk catalog downloads. The per-host politeness throttle in
 # net.fetch_json still paces every request; threads only overlap latency.
@@ -132,7 +153,20 @@ class TcgcsvBulkAdapter(GameAdapter):
                 )
                 if len(hits) >= 15:
                     return hits
+        if not hits:
+            # Substring matching found nothing: ask the synced name
+            # index for typo-tolerant suggestions before giving up.
+            # Exact queries never reach this branch, so exact behavior
+            # is untouched.
+            hits = _trigram_hits(self.game_key, query)
         return hits
+
+    def history_key(self, hit: CardHit) -> int | None:
+        """The card ID is the TCGplayer product ID, the history join key."""
+        try:
+            return int(hit.card_id)
+        except (TypeError, ValueError):
+            return None
 
     def get_prices(self, hit: CardHit) -> list[Price]:
         # Backbone rule: a fresh sync leads with the sidecar's USD price
@@ -146,15 +180,19 @@ class TcgcsvBulkAdapter(GameAdapter):
             join_key = None
         row = backbone.lookup_price(self.game_key, join_key) if join_key is not None else None
         if row is None:
-            return live
-        sidecar = prices_from_cents(
-            row["market_cents"],
-            row["mid_cents"],
-            as_of=row["as_of"],
-            source="tcgcsv",
-            source_url="https://tcgcsv.com",
-        )
-        return with_sidecar_price(sidecar, live)
+            prices = live
+        else:
+            sidecar = prices_from_cents(
+                row["market_cents"],
+                row["mid_cents"],
+                as_of=row["as_of"],
+                source="tcgcsv",
+                source_url="https://tcgcsv.com",
+            )
+            prices = with_sidecar_price(sidecar, live)
+        # The price is already fetched; filing the snapshot is free.
+        backbone.record_lookup(self.game_key, join_key, prices)
+        return prices
 
     def _live_prices(self, hit: CardHit) -> list[Price]:
         as_of = datetime.now(timezone.utc).isoformat(timespec="seconds")

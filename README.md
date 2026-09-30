@@ -11,7 +11,7 @@ Magic, Pokemon, Lorcana, One Piece, and Riftbound. One CLI, no account, no app, 
 
 ## Status
 
-0.1.0 is in the works: live price lookups, watchlists with target alerts, re-price checks with spike and drop flags, and a `doctor` command that reports on every price source. `portfolio` and `ev` are still on the workbench.
+0.1.0 is in the works: live price lookups, watchlists with target alerts, re-price checks with spike and drop flags, a `doctor` command that reports on every price source, and a `portfolio` command that tracks what you own with unrealized profit and loss. `ev` is still on the workbench.
 
 ## Install
 
@@ -29,13 +29,18 @@ topdeck watch add mtg "Lightning Bolt" --target 2.50  # watch a card, alert at $
 topdeck watch list                # everything you are watching
 topdeck check                     # re-price the watchlist, flag the movers
 topdeck check --alert-only         # only movers, target hits, and errors (cron-friendly)
+topdeck check --no-smart           # skip the price-history smart alerts
 topdeck doctor                    # are the price sources healthy?
+topdeck portfolio add mtg "Lightning Bolt" 4 1.25  # record a purchase
+topdeck portfolio                                  # value, cost, unrealized P&L
 topdeck --json watch list         # machine-readable output for scripts
 ```
 
 ## MCP server
 
 `topdeck-mcp` serves the same price data to MCP clients over stdio. Two tools: `search_cards` returns the ranked candidate list for a name, and `price_lookup` returns prices with market, currency, condition, printing, as-of, and source on every number. It never prompts; ambiguous queries return the candidates so the caller can decide.
+
+The MCP server is an optional extra: `pip install topdeck[mcp]`. The base install stays light without the MCP stack. Running `topdeck-mcp` without the extra prints the install command and exits.
 
 ## Why a terminal tool
 

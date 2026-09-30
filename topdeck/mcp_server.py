@@ -4,17 +4,27 @@ Same data as `topdeck price`, for assistants and scripts. Non-interactive
 by nature: the tools never prompt. When a query matches several cards,
 price_lookup returns the recommended match's prices plus the ranked
 alternatives, and the caller decides what to do next.
+
+The MCP stack is an optional extra (`pip install topdeck[mcp]`), so this
+module imports it defensively. Importing topdeck or running the CLI never
+touches MCP; running `topdeck-mcp` without the extra prints a one-line
+install hint and exits non-zero instead of raising ImportError.
 """
 
 from __future__ import annotations
 
-from mcp.server.mcpserver import MCPServer
+import sys
+
+try:
+    from mcp.server.mcpserver import MCPServer
+except ImportError:  # the mcp extra is not installed
+    MCPServer = None
 
 from topdeck import adapters as game_adapters
 from topdeck.adapters.base import CardHit, Price
 from topdeck.net import SourceError
 
-mcp = MCPServer("topdeck")
+EXTRA_HINT = "topdeck-mcp needs the mcp extra: pip install topdeck[mcp]"
 
 
 def _hit_dict(hit: CardHit) -> dict:
@@ -48,7 +58,6 @@ def _game_error(game: str) -> dict:
     }
 
 
-@mcp.tool()
 def search_cards(game: str, query: str) -> dict:
     """Find cards matching a name. Returns the ranked candidate list with
     the recommended match first (exact name, then most recent set)."""
@@ -69,7 +78,6 @@ def search_cards(game: str, query: str) -> dict:
     }
 
 
-@mcp.tool()
 def price_lookup(game: str, query: str, pick: int | None = None) -> dict:
     """Look up market prices for a card. Every price carries its market,
     currency, condition, printing, as-of timestamp, and source.
@@ -115,8 +123,21 @@ def price_lookup(game: str, query: str, pick: int | None = None) -> dict:
     }
 
 
+# Register the plain functions as MCP tools only when the extra is present,
+# so the module stays importable (and the functions directly callable) without it.
+if MCPServer is not None:
+    mcp = MCPServer("topdeck")
+    mcp.tool()(search_cards)
+    mcp.tool()(price_lookup)
+else:
+    mcp = None
+
+
 def main() -> None:
     """Entry point for the `topdeck-mcp` script. Speaks stdio."""
+    if mcp is None:
+        print(EXTRA_HINT, file=sys.stderr)
+        raise SystemExit(2)
     mcp.run()
 
 
