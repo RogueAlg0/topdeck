@@ -93,6 +93,7 @@ jobs:
           gh("repo", "clone", "RogueAlg0/homebrew-topdeck-tap", "/tmp/tap")
           branch = f"formula-bump-{ver}"
           subprocess.run(["git", "-C", "/tmp/tap", "checkout", "-b", branch], check=True)
+          os.makedirs("/tmp/tap/Formula", exist_ok=True)
           with open("/tmp/tap/Formula/topdeck.rb", "w") as f:
               f.write(formula)
           subprocess.run(["git", "-C", "/tmp/tap", "add", "Formula/topdeck.rb"], check=True)
