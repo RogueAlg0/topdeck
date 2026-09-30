@@ -1,0 +1,14 @@
+[
+  "tests/test_cli.py::test_help_exits_zero",
+  "tests/test_cli.py::test_no_command_prints_help",
+  "tests/test_cli.py::test_stub_json_output_parses[ev]",
+  "tests/test_cli.py::test_stub_json_output_parses[portfolio]",
+  "tests/test_cli.py::test_stub_json_output_parses[prices]",
+  "tests/test_cli.py::test_stub_json_output_parses[watch]",
+  "tests/test_cli.py::test_stub_subcommand_exits_zero[ev]",
+  "tests/test_cli.py::test_stub_subcommand_exits_zero[portfolio]",
+  "tests/test_cli.py::test_stub_subcommand_exits_zero[prices]",
+  "tests/test_cli.py::test_stub_subcommand_exits_zero[watch]",
+  "tests/test_cli.py::test_version_flag",
+  "tests/test_cli.py::test_version_string"
+]
