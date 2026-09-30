@@ -6,8 +6,26 @@ on:
   pull_request:
 
 jobs:
-  check:
-    name: check (${{ matrix.python-version }})
+  # Tidy the deck: lint and format must be clean.
+  shuffle:
+    name: shuffle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv pip install --system -e . ruff
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+
+  # Draw your opening hand: the test suite on every supported Python.
+  draw:
+    name: draw
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -20,10 +38,41 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: uv pip install --system -e . pytest ruff build
-      - name: Ruff lint
-        run: ruff check .
-      - name: Ruff format
-        run: ruff format --check .
+        run: uv pip install --system -e . pytest
       - name: Tests
         run: pytest -q
+
+  # Reveal the docs: the site must build cleanly.
+  reveal:
+    name: reveal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install docs dependencies
+        run: uv pip install --system "mkdocs" "mkdocs-material" "mkdocstrings[python]" .
+      - name: Build docs
+        run: mkdocs build --strict
+
+  # The perfect draw: install the built wheel and smoke test the binary.
+  topdeck:
+    name: topdeck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        run: |
+          uv pip install --system build
+          python -m build --wheel
+      - name: Install wheel and smoke test
+        run: |
+          uv pip install --system dist/topdeck-*.whl
+          topdeck --version
+          topdeck --json watch

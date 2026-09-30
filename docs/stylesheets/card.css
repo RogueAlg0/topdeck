@@ -1,0 +1,77 @@
+/* TCG card theme for the API reference.
+ *
+ * Each documented object renders as a trading card: a name bar on top,
+ * a type line naming the kind and rarity, and the docstring set in a
+ * card text box. Rarity accents follow the object kind:
+ * module (common, slate), function (uncommon, steel blue),
+ * class (rare, gold), attribute (mythic, violet).
+ */
+
+.doc-object {
+  --card-accent: #9aa0a6;
+  border: 2px solid var(--card-accent);
+  border-radius: 14px;
+  margin: 1.75em 0;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  background: var(--md-default-bg-color);
+}
+
+.doc-module { --card-accent: #9aa0a6; }
+.doc-function { --card-accent: #5b8dd9; }
+.doc-class { --card-accent: #d4a017; }
+.doc-attribute { --card-accent: #7a6ff0; }
+
+/* Name bar: the card's title strip. */
+.doc-object > .doc-heading {
+  margin: 0;
+  padding: 0.65em 1em 0.45em;
+  border-bottom: 2px solid var(--card-accent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--card-accent) 22%, transparent),
+    transparent
+  );
+  font-size: 1.15em;
+}
+
+.doc-object > .doc-heading code {
+  background: transparent;
+  padding: 0;
+}
+
+/* Type line: sits under the name bar like the bar under a card's art. */
+.doc-module > .doc-heading::after,
+.doc-function > .doc-heading::after,
+.doc-class > .doc-heading::after,
+.doc-attribute > .doc-heading::after {
+  display: block;
+  margin-top: 0.35em;
+  font-size: 0.68em;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--card-accent);
+}
+
+.doc-module > .doc-heading::after { content: "Module · Common"; }
+.doc-function > .doc-heading::after { content: "Function · Uncommon"; }
+.doc-class > .doc-heading::after { content: "Class · Rare"; }
+.doc-attribute > .doc-heading::after { content: "Attribute · Mythic"; }
+
+/* Card text box: the docstring body. */
+.doc-object > .doc-contents {
+  margin: 1em;
+  padding: 0.9em 1.1em;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  background: var(--md-code-bg-color);
+}
+
+.doc-object > .doc-contents > :first-child {
+  margin-top: 0;
+}
+
+.doc-object > .doc-contents > :last-child {
+  margin-bottom: 0;
+}
