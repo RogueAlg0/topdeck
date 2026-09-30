@@ -1,0 +1,151 @@
+"""Tests for the topdeck-mcp tools, with a fake game. No network."""
+
+import pytest
+
+import topdeck.adapters
+import topdeck.mcp_server as mcp_server
+from topdeck.adapters.base import CardHit, Price
+from topdeck.net import SourceError
+
+
+def _hit(name, set_name="New Set", collector_number="10"):
+    return CardHit(
+        card_id=name,
+        name=name,
+        set_code="S",
+        set_name=set_name,
+        collector_number=collector_number,
+        released_at="2024-01-01",
+        url="https://example.com/card",
+    )
+
+
+def _price(value=1.23):
+    return Price(
+        market="tcgplayer",
+        currency="USD",
+        condition="near-mint",
+        printing="normal",
+        price=value,
+        as_of="2026-09-30T00:00:00",
+        source="fakesource",
+        source_url="https://example.com/source",
+    )
+
+
+class FakeAdapter:
+    game_key = "fake"
+    display_name = "Fake Game"
+    trust_tier = "solid"
+    source_name = "fakesource"
+
+    def __init__(self, hits):
+        self._hits = hits
+        self.search_calls = []
+
+    def search(self, query):
+        self.search_calls.append(query)
+        if query == "boom":
+            raise SourceError("the price source is down.")
+        return list(self._hits)
+
+    def get_prices(self, hit):
+        return [_price()]
+
+
+@pytest.fixture
+def fake_game(monkeypatch):
+    adapter = FakeAdapter(
+        [
+            _hit("Exact Card", "New Set", "10"),
+            _hit("Exact Card", "Old Set", "1"),
+            _hit("Exact Cardamom", "New Set", "5"),
+        ]
+    )
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": adapter})
+    return adapter
+
+
+def test_search_cards_ranks_and_recommends(fake_game):
+    out = mcp_server.search_cards(game="fake", query="exact card")
+    assert out["matches"] == 3
+    assert out["recommended"] == 0
+    assert out["candidates"][0]["set_name"] == "New Set"
+    assert out["candidates"][0]["collector_number"] == "10"
+
+
+def test_search_cards_unknown_game(fake_game):
+    out = mcp_server.search_cards(game="yugioh", query="x")
+    assert "error" in out
+    assert "fake" in out["valid_games"]
+
+
+def test_search_cards_no_matches(monkeypatch):
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": FakeAdapter([])})
+    out = mcp_server.search_cards(game="fake", query="nothing")
+    assert out["matches"] == 0
+    assert out["candidates"] == []
+    assert out["recommended"] is None
+
+
+def test_search_cards_source_error(fake_game):
+    out = mcp_server.search_cards(game="fake", query="boom")
+    assert "error" in out
+
+
+def test_price_lookup_single_match_shape(monkeypatch):
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": FakeAdapter([_hit("Solo")])})
+    out = mcp_server.price_lookup(game="fake", query="solo")
+    assert out["matches"] == 1
+    assert out["result"]["card"]["name"] == "Solo"
+    assert out["result"]["recommended"] is True
+    assert out["alternatives"] == []
+    price = out["result"]["prices"][0]
+    for key in (
+        "market",
+        "currency",
+        "condition",
+        "printing",
+        "price",
+        "as_of",
+        "source",
+    ):
+        assert price[key], f"missing {key}"
+
+
+def test_price_lookup_multi_returns_recommended_plus_alternatives(fake_game):
+    out = mcp_server.price_lookup(game="fake", query="exact")
+    assert out["matches"] == 3
+    assert out["result"]["card"]["set_name"] == "New Set"
+    assert out["result"]["recommended"] is True
+    assert len(out["alternatives"]) == 2
+
+
+def test_price_lookup_pick_selects(fake_game):
+    out = mcp_server.price_lookup(game="fake", query="exact", pick=3)
+    assert out["result"]["card"]["name"] == "Exact Cardamom"
+    assert out["result"]["recommended"] is False
+
+
+def test_price_lookup_pick_out_of_range(fake_game):
+    out = mcp_server.price_lookup(game="fake", query="exact", pick=99)
+    assert "error" in out
+
+
+def test_price_lookup_unknown_game(fake_game):
+    out = mcp_server.price_lookup(game="yugioh", query="x")
+    assert "error" in out
+
+
+def test_game_isolation(fake_game, monkeypatch):
+    """A lookup for one game never touches another game's adapter."""
+    other = FakeAdapter([_hit("Other")])
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": fake_game, "other": other})
+    mcp_server.price_lookup(game="fake", query="exact")
+    mcp_server.search_cards(game="fake", query="exact")
+    assert other.search_calls == []
+    assert fake_game.search_calls == ["exact", "exact"]
+
+
+def test_entry_point_exists():
+    assert callable(mcp_server.main)

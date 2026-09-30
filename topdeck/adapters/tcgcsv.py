@@ -32,39 +32,41 @@ class TcgcsvBulkAdapter(GameAdapter):
         results = data.get("results", []) if isinstance(data, dict) else []
         return [g for g in results if isinstance(g, dict)]
 
-    def _catalog(self) -> list[dict]:
-        """Every product joined with its price rows, across all groups."""
-        catalog: list[dict] = []
-        for group in self._groups():
+    def _catalog(self) -> tuple[list[dict], dict[int, list[dict]]]:
+        """Products matching nothing are cheap: price rows are fetched only
+        for groups that actually contain a match, so a query never pays
+        for price data it cannot use."""
+        groups = self._groups()
+        products_by_group: dict[int, list[dict]] = {}
+        for group in groups:
             group_id = group.get("groupId")
             if group_id is None:
                 continue
-            base = f"https://tcgcsv.com/tcgplayer/{self.category_id}/{group_id}"
             products = net.fetch_json(
-                base + "/products",
+                f"https://tcgcsv.com/tcgplayer/{self.category_id}/{group_id}/products",
                 ttl=self.cache_ttl,
                 min_interval=self.min_interval,
                 user_agent=net.BROWSER_UA,
             )
-            prices = net.fetch_json(
-                base + "/prices",
-                ttl=self.cache_ttl,
-                min_interval=self.min_interval,
-                user_agent=net.BROWSER_UA,
-            )
-            by_product: dict[int, list[dict]] = {}
-            price_rows = prices.get("results", []) if isinstance(prices, dict) else []
-            for row in price_rows:
-                if isinstance(row, dict) and row.get("productId") is not None:
-                    by_product.setdefault(row["productId"], []).append(row)
             prod_rows = products.get("results", []) if isinstance(products, dict) else []
-            for prod in prod_rows:
-                if not isinstance(prod, dict):
-                    continue
+            products_by_group[group_id] = [p for p in prod_rows if isinstance(p, dict)]
+            for prod in products_by_group[group_id]:
                 prod["_group"] = group
-                prod["_prices"] = by_product.get(prod.get("productId"), [])
-                catalog.append(prod)
-        return catalog
+        return groups, products_by_group
+
+    def _prices_for(self, group_id: int) -> dict[int, list[dict]]:
+        prices = net.fetch_json(
+            f"https://tcgcsv.com/tcgplayer/{self.category_id}/{group_id}/prices",
+            ttl=self.cache_ttl,
+            min_interval=self.min_interval,
+            user_agent=net.BROWSER_UA,
+        )
+        by_product: dict[int, list[dict]] = {}
+        price_rows = prices.get("results", []) if isinstance(prices, dict) else []
+        for row in price_rows:
+            if isinstance(row, dict) and row.get("productId") is not None:
+                by_product.setdefault(row["productId"], []).append(row)
+        return by_product
 
     @staticmethod
     def _extended(prod: dict) -> dict:
@@ -76,27 +78,35 @@ class TcgcsvBulkAdapter(GameAdapter):
 
     def search(self, query: str) -> list[CardHit]:
         wanted = query.strip().lower()
+        _, products_by_group = self._catalog()
+        matched_groups: dict[int, list[dict]] = {}
+        for group_id, prods in products_by_group.items():
+            for prod in prods:
+                name = str(prod.get("cleanName") or prod.get("name") or "")
+                if wanted in name.lower():
+                    matched_groups.setdefault(group_id, []).append(prod)
         hits: list[CardHit] = []
-        for prod in self._catalog():
-            name = str(prod.get("cleanName") or prod.get("name") or "")
-            if wanted not in name.lower():
-                continue
-            group = prod.get("_group") or {}
-            ext = self._extended(prod)
-            hits.append(
-                CardHit(
-                    card_id=str(prod.get("productId", "")),
-                    name=name,
-                    set_code=str(group.get("abbreviation", "")),
-                    set_name=str(group.get("name", "")),
-                    collector_number=ext.get("Number", ""),
-                    released_at=str(group.get("publishedOn", "") or "")[:10],
-                    url=str(prod.get("url", "") or ""),
-                    extra={"prices": prod.get("_prices", [])},
+        for group_id, prods in matched_groups.items():
+            price_rows = self._prices_for(group_id)
+            for prod in prods:
+                group = prod.get("_group") or {}
+                ext = self._extended(prod)
+                hits.append(
+                    CardHit(
+                        card_id=str(prod.get("productId", "")),
+                        name=str(prod.get("cleanName") or prod.get("name") or ""),
+                        set_code=str(group.get("abbreviation", "")),
+                        set_name=str(group.get("name", "")),
+                        collector_number=ext.get("Number", ""),
+                        released_at=str(group.get("publishedOn", "") or "")[:10],
+                        url=str(prod.get("url", "") or ""),
+                        extra={
+                            "prices": price_rows.get(prod.get("productId"), []),
+                        },
+                    )
                 )
-            )
-            if len(hits) >= 15:
-                break
+                if len(hits) >= 15:
+                    return hits
         return hits
 
     def get_prices(self, hit: CardHit) -> list[Price]:

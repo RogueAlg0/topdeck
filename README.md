@@ -22,11 +22,15 @@ Coming with the 0.1.0 release. Not on PyPI yet.
 
 ```bash
 topdeck watch           # track cards, get alerted on price moves
-topdeck prices          # look up live market prices for a card
+topdeck price mtg "Black Lotus"  # look up live market prices for a card
 topdeck portfolio       # see what your collection is worth
 topdeck ev              # expected value of opening a pack or box
 topdeck --json watch    # machine-readable output for scripts
 ```
+
+## MCP server
+
+`topdeck-mcp` serves the same price data to MCP clients over stdio. Two tools: `search_cards` returns the ranked candidate list for a name, and `price_lookup` returns prices with market, currency, condition, printing, as-of, and source on every number. It never prompts; ambiguous queries return the candidates so the caller can decide.
 
 ## Why a terminal tool
 
