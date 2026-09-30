@@ -38,6 +38,17 @@ def _amount(value: float | None, currency: str) -> str:
     return f"{symbol}{value:,.2f}"
 
 
+def _market_label(price: Price) -> str:
+    """Market name, with the provenance when the number is not a market price.
+
+    A TCGCSV mid-price fallback renders as "tcgplayer mid" so it is never
+    mistaken for a market price. Short enough for the 80-column table.
+    """
+    if price.provenance and price.provenance != "market":
+        return f"{price.market} {price.provenance}"
+    return price.market
+
+
 def _relative_as_of(raw: str, now: datetime | None = None) -> str:
     """Render an ISO timestamp as "2h ago".
 
@@ -79,7 +90,7 @@ def price_table(hit: CardHit, prices: list[Price]) -> Table:
             hit.set_name or hit.set_code,
             hit.collector_number,
             price.printing,
-            linked(price.market, price.source_url),
+            linked(_market_label(price), price.source_url),
             _money(price),
             _relative_as_of(price.as_of),
         )
@@ -126,6 +137,7 @@ def candidate_table(
 def _price_dict(price: Price) -> dict:
     return {
         "market": price.market,
+        "provenance": price.provenance,
         "currency": price.currency,
         "condition": price.condition,
         "printing": price.printing,
@@ -199,6 +211,91 @@ def print_result(
         )
         return
     console.print(price_table(hit, prices))
+
+
+# ---------------------------------------------------------------------------
+# Decklist batch pricing
+
+
+def batch_table(lines: list) -> Table:
+    """One row per decklist entry: quantity, card, unit price, line total.
+
+    Each line has .quantity, .query, .hit (or None), .unit (a Price or
+    None), .line_total (or None), .error (or None), and .note (or None).
+    """
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Qty", justify="right", style="dim")
+    table.add_column("Card")
+    table.add_column("Unit", justify="right")
+    table.add_column("Total", justify="right")
+    for line in lines:
+        qty = f"{line.quantity}x"
+        if line.error is not None or line.unit is None:
+            card = Text(line.query)
+            card.append(f"  {line.error or 'no prices right now'}", style="dim")
+            missing = Text("n/a", style="dim")
+            table.add_row(qty, card, missing, missing)
+            continue
+        hit = line.hit
+        card = linked(hit.name, hit.url)
+        detail = f"{hit.set_name or hit.set_code} #{hit.collector_number}".rstrip(" #")
+        if detail:
+            card.append(f"  {detail}", style="dim")
+        if line.note:
+            card.append(f"\n{line.note}", style="dim")
+        unit = Text(_money(line.unit))
+        unit.append(f" {_market_label(line.unit)}", style="dim")
+        table.add_row(
+            qty,
+            card,
+            unit,
+            Text(_amount(line.line_total, line.unit.currency)),
+        )
+    return table
+
+
+def grand_total_lines(totals: dict[str, float]) -> list[Text]:
+    """Bold "Grand total: $X" lines, one per currency present."""
+    rendered = []
+    for currency, total in totals.items():
+        text = Text("Grand total: ", style="bold")
+        text.append(_amount(total, currency), style="bold")
+        rendered.append(text)
+    return rendered
+
+
+def batch_json(
+    *,
+    game: str,
+    lines: list,
+    grand_total: dict[str, float],
+    warnings: list[str],
+) -> str:
+    """Machine-readable batch result: per-line entries plus grand totals."""
+    return json.dumps(
+        {
+            "command": "price",
+            "mode": "batch",
+            "game": game,
+            "lines": [
+                {
+                    "query": line.query,
+                    "quantity": line.quantity,
+                    "card": _hit_dict(line.hit) if line.hit else None,
+                    "unit_price": _price_dict(line.unit) if line.unit else None,
+                    "prices": [_price_dict(p) for p in line.prices],
+                    "line_total": line.line_total,
+                    "line_currency": line.unit.currency if line.unit else None,
+                    "error": line.error,
+                    "note": line.note,
+                }
+                for line in lines
+            ],
+            "grand_total": grand_total,
+            "warnings": warnings,
+        },
+        indent=2,
+    )
 
 
 # ---------------------------------------------------------------------------

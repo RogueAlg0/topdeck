@@ -38,6 +38,7 @@ class Price:
     as_of: str  # ISO 8601 timestamp
     source: str  # adapter's source name, e.g. scryfall
     source_url: str = ""
+    provenance: str = "market"  # "market", or "mid" when the number is a fallback
 
 
 class GameAdapter:

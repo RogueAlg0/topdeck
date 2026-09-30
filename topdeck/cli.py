@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from rich.console import Console
@@ -20,14 +22,18 @@ from rich.panel import Panel
 
 from topdeck import __version__, progress
 from topdeck import adapters as game_adapters
+from topdeck.adapters.base import CardHit, Price
 from topdeck.doctor import check_sources, local_checks
 from topdeck.net import SourceError
 from topdeck.output import (
+    batch_json,
+    batch_table,
     candidate_table,
     check_json,
     check_table,
     doctor_json,
     doctor_table,
+    grand_total_lines,
     json_payload,
     print_result,
     watch_json,
@@ -62,8 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     price = sub.add_parser(
         "price",
-        help="Look up the market price of a card.",
-        description="Look up the market price of a card, across all five games.",
+        help="Look up the market price of a card, or a whole decklist.",
+        description="Look up the market price of a card.",
     )
     price.add_argument(
         "game",
@@ -71,20 +77,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     price.add_argument(
         "query",
-        nargs="+",
-        help='card name, e.g. topdeck price mtg "Black Lotus"',
+        nargs="*",
+        help='card name, e.g. topdeck price mtg "Black Lotus" (omit to read a decklist from stdin)',
+    )
+    price.add_argument(
+        "--file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "price every card in a decklist file instead of one query. "
+            'Each line is "<qty> <card name>", e.g. "4 Lightning Bolt" or '
+            '"4x Lightning Bolt"; a bare name means one copy. Blank lines '
+            "and # comments are skipped. Without --file and without a query, "
+            "names are read from stdin, one per line."
+        ),
     )
     price.add_argument(
         "--pick",
         type=int,
         default=None,
         metavar="N",
-        help="choose match number N instead of being asked",
+        help="choose match number N instead of being asked (applies to every card in batch mode)",
     )
     price.add_argument(
         "--first",
         action="store_true",
-        help="take the recommended match without asking",
+        help="take the recommended match without asking (applies to every card in batch mode)",
     )
 
     watch = sub.add_parser(
@@ -205,6 +223,8 @@ def cmd_price(args: argparse.Namespace, console: Console) -> int:
         console.print(f'[red]Unknown game "{args.game}".[/red]')
         console.print(f"Valid games: {_game_list()}")
         return 2
+    if args.file is not None or not args.query:
+        return cmd_price_from_list(args, adapter, console)
     query = " ".join(args.query).strip()
     try:
         hits = adapter.search(query)
@@ -281,6 +301,218 @@ def cmd_price(args: argparse.Namespace, console: Console) -> int:
         )
         console.print(candidate_table(shown, numbers=ranked_numbers[:9], recommended=None))
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Decklist batch pricing
+
+
+_DECKLIST_QTY = re.compile(r"^(\d+)\s*[xX]?\s+(.+)$")
+_DECKLIST_QTY_ONLY = re.compile(r"^(\d+)\s*[xX]\s*$")
+
+
+class _UnparseableLine(Exception):
+    """A decklist line that looks like an entry but names no card."""
+
+
+def _parse_decklist_line(stripped: str) -> tuple[int, str]:
+    """Parse one non-blank, non-comment decklist line into (quantity, name)."""
+    match = _DECKLIST_QTY.match(stripped)
+    if match:
+        quantity = int(match.group(1))
+        name = match.group(2).strip()
+        if quantity < 1 or not name:
+            raise _UnparseableLine(f'"{stripped}" is not a usable entry')
+        return quantity, name
+    if _DECKLIST_QTY_ONLY.match(stripped):
+        raise _UnparseableLine(f'"{stripped}" names no card')
+    return 1, stripped
+
+
+def parse_decklist(lines: list[str]) -> tuple[list[tuple[int, str]], list[str]]:
+    """Parse decklist lines into (quantity, name) entries.
+
+    Blank lines and # comments are skipped. Broken lines are skipped with
+    a warning naming the line number; parsing never crashes.
+    """
+    entries: list[tuple[int, str]] = []
+    warnings: list[str] = []
+    for lineno, raw in enumerate(lines, 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            entries.append(_parse_decklist_line(stripped))
+        except _UnparseableLine as exc:
+            warnings.append(f"line {lineno}: {exc} (skipped)")
+    return entries, warnings
+
+
+@dataclass
+class BatchLine:
+    """One decklist entry after resolution."""
+
+    query: str
+    quantity: int
+    hit: CardHit | None
+    prices: list[Price]
+    unit: Price | None  # the one price the line total is built on
+    error: str | None
+    note: str | None
+
+    @property
+    def line_total(self) -> float | None:
+        if self.unit is None or self.unit.price is None:
+            return None
+        return self.quantity * self.unit.price
+
+
+def _resolve_batch_card(
+    adapter, name: str, args: argparse.Namespace, console: Console
+) -> tuple[CardHit | None, list[Price], str | None, str | None]:
+    """Resolve one decklist name. Returns (hit, prices, error, note).
+
+    Never prints: batch JSON must stay pure on stdout, and terminal
+    batch output renders problems inline in the table.
+    """
+    try:
+        hits = adapter.search(name)
+    except SourceError as exc:
+        return None, [], f"Could not look that up: {exc}", None
+    if not hits:
+        return None, [], "No matches. Try a shorter query or check the spelling.", None
+    ranked = game_adapters.rank_candidates(hits, name)
+    note = None
+    if len(ranked) == 1:
+        chosen = ranked[0]
+    elif args.pick is not None:
+        if not 1 <= args.pick <= len(ranked):
+            return (
+                None,
+                [],
+                f"--pick {args.pick} is out of range ({len(ranked)} matches).",
+                None,
+            )
+        chosen = ranked[args.pick - 1]
+    elif args.first or args.json or not _is_interactive():
+        chosen = ranked[0]
+        if not args.first:
+            note = f'{len(ranked)} matches; using top hit "{chosen.name}".'
+    else:
+        picked = interactive_pick(console, ranked, name)
+        if picked is None:
+            return None, [], "Skipped.", None
+        chosen = picked
+    try:
+        prices = adapter.get_prices(chosen)
+    except SourceError as exc:
+        return chosen, [], f"Could not fetch prices: {exc}", note
+    return chosen, prices, None, note
+
+
+def cmd_price_batch(
+    args: argparse.Namespace,
+    adapter,
+    entries: list[tuple[int, str]],
+    warnings: list[str],
+    console: Console,
+) -> int:
+    """Price every entry. One lookup per distinct card name."""
+    distinct: list[str] = []
+    seen: set[str] = set()
+    for _, name in entries:
+        key = name.strip().lower()
+        if key not in seen:
+            seen.add(key)
+            distinct.append(name)
+    notes: list[str] = []
+    ticker = Progress("Pricing decklist", len(distinct))
+
+    def _one(name: str) -> BatchLine:
+        hit, prices, error, note = _resolve_batch_card(adapter, name, args, console)
+        unit = pick_tracked_price(prices) if error is None else None
+        if note:
+            notes.append(f"{name}: {note}")
+        ticker.tick()
+        return BatchLine(
+            query=name,
+            quantity=0,
+            hit=hit,
+            prices=prices,
+            unit=unit,
+            error=error,
+            note=note,
+        )
+
+    if _is_interactive() and not args.json and args.pick is None and not args.first:
+        # The disambiguation picker needs the terminal to itself.
+        resolved = [_one(name) for name in distinct]
+    else:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            resolved = list(pool.map(_one, distinct))
+    ticker.finish()
+
+    by_name = {name.strip().lower(): line for name, line in zip(distinct, resolved)}
+    lines = [
+        BatchLine(
+            query=name,
+            quantity=quantity,
+            hit=base.hit,
+            prices=base.prices,
+            unit=base.unit,
+            error=base.error,
+            note=base.note,
+        )
+        for quantity, name in entries
+        for base in [by_name[name.strip().lower()]]
+    ]
+
+    totals: dict[str, float] = {}
+    for line in lines:
+        if line.line_total is not None:
+            totals[line.unit.currency] = totals.get(line.unit.currency, 0.0) + line.line_total
+
+    if args.json or not _is_interactive():
+        # Automatic top-hit choices get a stderr note, never silent.
+        for note_text in notes:
+            print(note_text, file=sys.stderr)
+    if args.json:
+        print(batch_json(game=adapter.game_key, lines=lines, grand_total=totals, warnings=warnings))
+        return 0
+    console.print(batch_table(lines))
+    for text in grand_total_lines(totals):
+        console.print(text)
+    return 0
+
+
+def cmd_price_from_list(args: argparse.Namespace, adapter, console: Console) -> int:
+    """Batch mode: read the decklist from --file or stdin, then price it."""
+    if args.file is not None and args.query:
+        console.print("[red]Give either a card name or --file, not both.[/red]")
+        return 2
+    if args.file is not None:
+        try:
+            with open(args.file, encoding="utf-8") as handle:
+                raw_lines = handle.read().splitlines()
+        except OSError as exc:
+            console.print(f'[red]Could not read "{args.file}": {exc}[/red]')
+            return 1
+    elif sys.stdin.isatty():
+        console.print("[red]Give a card name, or a decklist via --file or stdin.[/red]")
+        console.print('Example: topdeck price mtg "Black Lotus"')
+        return 2
+    else:
+        raw_lines = sys.stdin.read().splitlines()
+    entries, warnings = parse_decklist(raw_lines)
+    for warning in warnings:
+        print(warning, file=sys.stderr)
+    if not entries:
+        if args.json:
+            print(batch_json(game=adapter.game_key, lines=[], grand_total={}, warnings=warnings))
+        else:
+            console.print("No card names found. The decklist is empty or only comments.")
+        return 0
+    return cmd_price_batch(args, adapter, entries, warnings, console)
 
 
 # ---------------------------------------------------------------------------

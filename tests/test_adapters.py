@@ -265,8 +265,10 @@ def test_tcgcsv_bulk_search_and_prices(no_net):
     by_printing = {p.printing: p for p in prices}
     # marketPrice preferred ...
     assert by_printing["normal"].price == 1.75
+    assert by_printing["normal"].provenance == "market"
     # ... midPrice fallback when marketPrice is null
     assert by_printing["foil"].price == 10.0
+    assert by_printing["foil"].provenance == "mid"
     for p in prices:
         assert p.market == "tcgplayer"
         assert p.currency == "USD"
