@@ -26,9 +26,15 @@ def linked(text: str, url: str) -> Text:
 def _money(price: Price) -> str:
     if price.price is None:
         return "n/a"
+    return _amount(price.price, price.currency)
+
+
+def _amount(value: float | None, currency: str) -> str:
+    if value is None:
+        return "n/a"
     symbols = {"USD": "$", "EUR": "\u20ac", "GBP": "\u00a3", "JPY": "\u00a5"}
-    symbol = symbols.get(price.currency, price.currency + " ")
-    return f"{symbol}{price.price:,.2f}"
+    symbol = symbols.get(currency, currency + " ")
+    return f"{symbol}{value:,.2f}"
 
 
 def price_table(hit: CardHit, prices: list[Price]) -> Table:
@@ -171,3 +177,165 @@ def print_result(
         )
         return
     console.print(price_table(hit, prices))
+
+
+# ---------------------------------------------------------------------------
+# Watchlists and check
+
+
+def _watch_dict(watch) -> dict:
+    return {
+        "id": watch.id,
+        "game": watch.game,
+        "card_id": watch.card_id,
+        "name": watch.name,
+        "set_name": watch.set_name,
+        "target_price": watch.target_price,
+    }
+
+
+def watch_table(watches) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("ID", justify="right", style="dim")
+    table.add_column("Game")
+    table.add_column("Card")
+    table.add_column("Set")
+    table.add_column("Target", justify="right")
+    for watch in watches:
+        target = _amount(watch.target_price, "USD") if watch.target_price else "-"
+        table.add_row(
+            str(watch.id),
+            watch.game,
+            watch.name,
+            watch.set_name or "-",
+            target,
+        )
+    return table
+
+
+def _change_text(row) -> str:
+    if row.delta_abs is None or row.delta_pct is None:
+        return "n/a"
+    sign = "+" if row.delta_abs >= 0 else "-"
+    return f"{sign}{_amount(abs(row.delta_abs), row.currency)} ({sign}{abs(row.delta_pct):.1f}%)"
+
+
+def _signal_text(row) -> str:
+    if row.error:
+        return "[red]error[/red]"
+    parts = []
+    if row.target_hit:
+        parts.append("[bold green]TARGET HIT[/bold green]")
+    if row.spike:
+        parts.append("[red]spike[/red]")
+    if row.drop:
+        parts.append("[green]drop[/green]")
+    if not parts and row.previous is None and row.current is not None:
+        parts.append("[dim]new[/dim]")
+    return ", ".join(parts)
+
+
+def check_table(rows) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Card")
+    table.add_column("Prev", justify="right")
+    table.add_column("Now", justify="right")
+    table.add_column("Change", justify="right")
+    table.add_column("Signal")
+    for row in rows:
+        watch = row.watch
+        card = Text(watch.name)
+        if watch.set_name:
+            card.append(f"  {watch.set_name}", style="dim")
+        if row.note:
+            card.append(f"\n{row.note}", style="dim")
+        now = _amount(row.current, row.currency) if not row.error else "n/a"
+        table.add_row(
+            card,
+            _amount(row.previous, row.currency),
+            now,
+            _change_text(row),
+            _signal_text(row),
+        )
+    return table
+
+
+def doctor_table(sources, local) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    styles = {"ok": "green", "slow": "yellow", "down": "red"}
+    for src in sources:
+        style = styles.get(src.status, "")
+        latency = f"{src.latency_ms} ms" if src.latency_ms is not None else "-"
+        table.add_row(
+            f"{src.display_name} ({src.source})",
+            f"[{style}]{src.status}[/{style}]",
+            f"{src.detail}, {latency}",
+        )
+    for label, detail in local:
+        table.add_row(label, "[green]ok[/green]", detail)
+    return table
+
+
+def watch_json(action: str, watches, extra: dict | None = None) -> str:
+    payload: dict = {
+        "command": "watch",
+        "action": action,
+        "watches": [_watch_dict(w) for w in watches],
+    }
+    if extra:
+        payload.update(extra)
+    return json.dumps(payload, indent=2)
+
+
+def check_row_dict(row) -> dict:
+    return {
+        "watch": _watch_dict(row.watch),
+        "previous": row.previous,
+        "current": row.current,
+        "currency": row.currency,
+        "source": row.source,
+        "delta_abs": row.delta_abs,
+        "delta_pct": row.delta_pct,
+        "spike": row.spike,
+        "drop": row.drop,
+        "target_hit": row.target_hit,
+        "alert": row.alert,
+        "error": row.error,
+        "note": row.note,
+    }
+
+
+def check_json(rows, alert_only: bool, checked_at: str) -> str:
+    return json.dumps(
+        {
+            "command": "check",
+            "checked_at": checked_at,
+            "alert_only": alert_only,
+            "rows": [check_row_dict(r) for r in rows],
+        },
+        indent=2,
+    )
+
+
+def doctor_json(sources, local) -> str:
+    return json.dumps(
+        {
+            "command": "doctor",
+            "sources": [
+                {
+                    "game": s.game,
+                    "display_name": s.display_name,
+                    "source": s.source,
+                    "status": s.status,
+                    "latency_ms": s.latency_ms,
+                    "detail": s.detail,
+                }
+                for s in sources
+            ],
+            "local": [{"label": label, "detail": detail} for label, detail in local],
+        },
+        indent=2,
+    )
