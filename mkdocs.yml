@@ -1,0 +1,44 @@
+site_name: topdeck
+site_description: Terminal-native TCG price watcher. Track your cards, catch the spikes, never pay full price for cardboard.
+site_url: https://roguealg0.github.io/topdeck/
+repo_url: https://github.com/RogueAlg0/topdeck
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+  palette:
+    - scheme: default
+      primary: amber
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: amber
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            heading_level: 2
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+
+extra_css:
+  - stylesheets/card.css
+
+nav:
+  - Home: index.md
+  - API reference: api.md

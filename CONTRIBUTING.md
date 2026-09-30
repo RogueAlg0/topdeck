@@ -14,6 +14,13 @@ ruff format --check .
 
 CI runs the same four steps on Python 3.10 through 3.13.
 
+Docs live in `docs/` and build with MkDocs Material:
+
+```bash
+pip install "mkdocs" "mkdocs-material" "mkdocstrings[python]"
+mkdocs serve   # preview locally; CI runs `mkdocs build --strict`
+```
+
 ## Ground rules
 
 - Branch off main, open a PR, keep it focused. One change per PR.
