@@ -9,7 +9,7 @@ description = "Terminal-native TCG price watcher. Track your cards, catch the sp
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["rich>=13"]
+dependencies = ["rich>=13", "questionary>=2"]
 
 [project.scripts]
 topdeck = "topdeck.cli:main"
