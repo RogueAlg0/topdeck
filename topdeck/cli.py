@@ -12,12 +12,13 @@ import json
 import math
 import sqlite3
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from rich.console import Console
 from rich.panel import Panel
 
-from topdeck import __version__
+from topdeck import __version__, progress
 from topdeck import adapters as game_adapters
 from topdeck.doctor import check_sources, local_checks
 from topdeck.net import SourceError
@@ -33,6 +34,7 @@ from topdeck.output import (
     watch_table,
 )
 from topdeck.pick import interactive_pick
+from topdeck.progress import Progress
 from topdeck.watch import WatchStore, build_row, pick_tracked_price
 
 COMMAND_DESCRIPTIONS = {
@@ -472,6 +474,25 @@ def _check_one(store: WatchStore, watch):
     return row
 
 
+def _check_parallel(store: WatchStore, watches) -> list:
+    """Re-price every watch on threads.
+
+    Network latency overlaps; the per-host throttle in net.fetch_json
+    still paces every request, and pool.map keeps watchlist order.
+    """
+    ticker = Progress("Checking watchlist", len(watches))
+
+    def _one(watch):
+        row = _check_one(store, watch)
+        ticker.tick()
+        return row
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(_one, watches))
+    ticker.finish()
+    return rows
+
+
 def cmd_check(args: argparse.Namespace, console: Console, as_json: bool) -> int:
     store = WatchStore()
     watches = store.list()
@@ -484,7 +505,7 @@ def cmd_check(args: argparse.Namespace, console: Console, as_json: bool) -> int:
                 'Your watchlist is empty. Add a card with: topdeck watch add <game> "<card>"'
             )
         return 0
-    rows = [_check_one(store, watch) for watch in watches]
+    rows = _check_parallel(store, watches)
     shown = [row for row in rows if row.alert] if args.alert_only else rows
     if as_json:
         print(check_json(shown, args.alert_only, checked_at))
@@ -533,6 +554,8 @@ def cmd_doctor(args: argparse.Namespace, console: Console, as_json: bool) -> int
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Progress goes to stderr; machine output must stay pure JSON.
+    progress.set_enabled(not args.json)
     console = Console()
     if args.command is None:
         parser.print_help()

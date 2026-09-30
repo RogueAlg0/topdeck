@@ -80,6 +80,9 @@ class WatchStore:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
+        # check runs watches on threads; wait briefly on a locked
+        # database instead of failing the whole run.
+        conn.execute("PRAGMA busy_timeout = 5000")
         conn.row_factory = sqlite3.Row
         return conn
 

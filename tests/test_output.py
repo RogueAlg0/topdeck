@@ -9,11 +9,15 @@ from rich.console import Console
 from topdeck.adapters.base import CardHit, Price
 from topdeck.output import (
     _amount,
+    _change_text,
+    _check_amount,
     _money,
+    _relative_as_of,
     _signal_text,
     candidate_table,
     check_table,
     linked,
+    price_table,
     print_result,
     watch_json,
 )
@@ -150,3 +154,103 @@ def test_watch_json_merges_extra():
     payload = json.loads(watch_json("list", [], extra={"count": 3}))
     assert payload["count"] == 3
     assert payload["action"] == "list"
+
+
+# ---------------------------------------------------------------------------
+# Price table: 80-column friendly
+
+
+def test_relative_as_of_renders_human_times():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
+    cases = [
+        ("2026-09-30T11:59:30+00:00", "just now"),
+        ("2026-09-30T12:00:30+00:00", "just now"),  # future stamp: clock skew
+        ("2026-09-30T12:00:00", "just now"),  # naive stamp read as UTC
+        ("2026-09-30T11:55:00+00:00", "5m ago"),
+        ("2026-09-30T10:00:00+00:00", "2h ago"),
+        ("2026-09-27T12:00:00+00:00", "3d ago"),
+        ("2026-08-01T12:00:00+00:00", "2026-08-01"),
+        ("not-a-date", "not-a-date"),  # garbage passes through, never crashes
+    ]
+    for raw, expected in cases:
+        assert _relative_as_of(raw, now=now) == expected
+
+
+def test_relative_as_of_defaults_to_now():
+    # Far enough in the past that any real "now" renders the plain date.
+    assert _relative_as_of("2000-01-01T00:00:00+00:00") == "2000-01-01"
+
+
+def test_price_table_columns_fold_source_into_market():
+    table = price_table(_hit(), [_price(), _price()])
+    assert [c.header for c in table.columns] == [
+        "Set",
+        "Collector #",
+        "Finish",
+        "Market",
+        "Price",
+        "As of",
+    ]
+
+
+def test_price_table_caps_long_set_names():
+    console = Console(width=80, record=True)
+    long_name = "A Very Long Set Name That Would Wrap Across Many Lines Here"
+    console.print(price_table(_hit(set_name=long_name), [_price()]))
+    out = console.export_text()
+    assert long_name not in out  # capped with an ellipsis, never wrapped
+    assert "Market" in out and "As of" in out
+
+
+# ---------------------------------------------------------------------------
+# Check table: split set column, quiet rows dimmed, currencies labeled
+
+
+def test_check_table_splits_set_into_own_column():
+    console = _console()
+    console.print(check_table([_row()]))
+    out = console.export_text()
+    assert "Set" in out
+    assert "Alpha" in out
+
+
+def test_check_amount_labels_non_usd_currency():
+    assert _check_amount(1.50, "USD").plain == "$1.50"
+    assert _check_amount(1.90, "EUR").plain == "\u20ac1.90 EUR"
+    assert _check_amount(None, "EUR").plain == "n/a"
+
+
+def test_change_text_negative_move():
+    row = _row(delta_abs=-0.2, delta_pct=-20.0, spike=False, drop=True)
+    assert _change_text(row).plain == "-$0.20 (-20.0%)"
+
+
+def test_change_text_zero_move_is_quiet():
+    row = _row(previous=1.0, current=1.0, delta_abs=0.0, delta_pct=0.0, spike=False)
+    assert _change_text(row).plain == "no change"
+
+
+def test_change_text_labels_eur():
+    row = _row(currency="EUR", delta_abs=0.9, delta_pct=90.0)
+    assert _change_text(row).plain == "+\u20ac0.90 (+90.0%) EUR"
+
+
+def test_check_table_dims_unchanged_rows():
+    row = _row(previous=1.0, current=1.0, delta_abs=0.0, delta_pct=0.0, spike=False)
+    assert not row.alert
+    console = _console()
+    console.print(check_table([row]))
+    out = console.export_text()
+    assert "no change" in out
+    assert "+$0.00" not in out
+
+
+def test_check_table_error_row():
+    row = _row(error="source is down", current=None, delta_abs=None, delta_pct=None)
+    console = _console()
+    console.print(check_table([row]))
+    out = console.export_text()
+    assert "error" in out
+    assert "n/a" in out

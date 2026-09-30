@@ -465,3 +465,112 @@ def test_tcgcsv_skips_unparseable_price_row():
     prices = REGISTRY["riftbound"].get_prices(hit)
     assert len(prices) == 1
     assert prices[0].price == 2.5
+
+
+# ---------------------------------------------------------------------------
+# Scryfall 404 means "no such card", not an outage
+
+
+def test_scryfall_404_is_no_match(no_net):
+    def missing():
+        raise topdeck.net.SourceError("the price source returned HTTP 404.", status=404)
+
+    import topdeck.adapters.mtg as mtg_mod
+
+    no_net.routes["https://api.scryfall.com/cards/search?q=Bogus"] = missing
+    assert mtg_mod.ScryfallAdapter().search("Bogus") == []
+
+
+def test_scryfall_500_still_raises(no_net):
+    def down():
+        raise topdeck.net.SourceError("the price source returned HTTP 500.", status=500)
+
+    import topdeck.adapters.mtg as mtg_mod
+
+    no_net.routes["https://api.scryfall.com/cards/search?q=Bolt"] = down
+    with pytest.raises(topdeck.net.SourceError):
+        mtg_mod.ScryfallAdapter().search("Bolt")
+
+
+# ---------------------------------------------------------------------------
+# Bulk downloads run on threads while the throttle paces every request
+
+
+def _threaded_fetch(monkeypatch, fake, marker, parties):
+    """Wrap the fake fetch so `parties` overlapping calls must use threads.
+
+    A barrier that only `parties` distinct threads can pass proves the
+    downloads overlap instead of running one after another.
+    """
+    import threading
+
+    barrier = threading.Barrier(parties, timeout=10)
+    seen = set()
+    lock = threading.Lock()
+
+    def wrapped(url, **kwargs):
+        with lock:
+            seen.add(threading.get_ident())
+        if marker in url:
+            barrier.wait()
+        return fake(url, **kwargs)
+
+    monkeypatch.setattr(topdeck.net, "fetch_json", wrapped)
+    return seen
+
+
+def test_tcgcsv_catalog_downloads_in_parallel(no_net, monkeypatch):
+    cat = 89
+    no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/groups"] = lambda: {
+        "results": [{"groupId": i, "name": f"Set {i}"} for i in range(1, 5)]
+    }
+    for i in range(1, 5):
+        no_net.routes[f"https://tcgcsv.com/tcgplayer/{cat}/{i}/products"] = lambda i=i: {
+            "results": [{"productId": i, "cleanName": f"Card {i}"}]
+        }
+    seen = _threaded_fetch(monkeypatch, no_net, "/products", 4)
+    groups, products_by_group = REGISTRY["riftbound"]._catalog()
+    assert len(products_by_group) == 4
+    assert {p["cleanName"] for rows in products_by_group.values() for p in rows} == {
+        f"Card {i}" for i in range(1, 5)
+    }
+    assert groups[0]["name"] == "Set 1"
+    # Four overlapping barrier passes need at least four threads.
+    assert len(seen) >= 4
+
+
+def test_lorcast_card_lists_download_in_parallel(no_net, monkeypatch):
+    no_net.routes["https://api.lorcast.com/v0/sets"] = lambda: {
+        "results": [{"code": f"S{i}", "name": f"Set {i}"} for i in range(1, 5)]
+    }
+    for i in range(1, 5):
+        no_net.routes[f"https://api.lorcast.com/v0/sets/S{i}/cards"] = lambda i=i: [
+            {"id": f"c{i}", "name": f"Card {i}", "prices": {"usd": "1.0"}}
+        ]
+    seen = _threaded_fetch(monkeypatch, no_net, "/cards", 4)
+    cards = REGISTRY["lorcana"]._all_cards()
+    # pool.map preserves set order, and every card keeps its set tag.
+    assert [(c["name"], c["_set"]["code"]) for c in cards] == [
+        (f"Card {i}", f"S{i}") for i in range(1, 5)
+    ]
+    assert len(seen) >= 4
+
+
+def test_tcgdex_details_download_in_parallel(no_net, monkeypatch):
+    no_net.routes["https://api.tcgdex.net/v2/en/cards?name=Pikachu"] = lambda: [
+        {"id": f"swsh3-{i}", "localId": str(i), "name": "Pikachu"} for i in range(1, 5)
+    ]
+    for i in range(1, 5):
+        no_net.routes[f"https://api.tcgdex.net/v2/en/cards/swsh3-{i}"] = lambda i=i: {
+            "id": f"swsh3-{i}",
+            "name": "Pikachu",
+            "localId": str(i),
+            "set": {"id": "swsh3", "name": "Set", "releaseDate": "2021-01-01"},
+            "pricing": {"tcgplayer": {"normal": {"marketPrice": 1.0}}},
+        }
+    seen = _threaded_fetch(monkeypatch, no_net, "/cards/swsh3-", 4)
+    hits = REGISTRY["pokemon"].search("Pikachu")
+    assert len(hits) == 4
+    # Ranked order survives the threads: pool.map preserves input order.
+    assert [h.collector_number for h in hits] == ["1", "2", "3", "4"]
+    assert len(seen) >= 4

@@ -8,9 +8,11 @@ fetches are capped.
 from __future__ import annotations
 
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 from topdeck import net
 from topdeck.adapters.base import CardHit, GameAdapter, Price, rank_candidates
+from topdeck.progress import Progress
 
 _DETAIL_CAP = 12
 
@@ -44,8 +46,22 @@ class TcgdexAdapter(GameAdapter):
             if item.get("id")
         ]
         hits: list[CardHit] = []
-        for cand in rank_candidates(prelim, query)[:_DETAIL_CAP]:
+        # Detail fetches run on threads; the per-host throttle in
+        # net.fetch_json still spaces every request, so this overlaps
+        # TCGdex's latency without getting pushy. Results stay in
+        # ranked order because pool.map preserves input order.
+        shortlist = rank_candidates(prelim, query)[:_DETAIL_CAP]
+        progress = Progress("Fetching card details", len(shortlist))
+
+        def _one(cand: CardHit) -> tuple[CardHit, dict]:
             detail = self._detail(cand.card_id)
+            progress.tick()
+            return cand, detail
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            resolved = list(pool.map(_one, shortlist))
+        progress.finish()
+        for cand, detail in resolved:
             if not detail:
                 continue
             set_info = detail.get("set") or {}

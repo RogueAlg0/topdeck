@@ -8,6 +8,7 @@ hyperlink support; we never emit escape codes ourselves.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from rich.console import Console
 from rich.table import Table
@@ -37,29 +38,50 @@ def _amount(value: float | None, currency: str) -> str:
     return f"{symbol}{value:,.2f}"
 
 
+def _relative_as_of(raw: str, now: datetime | None = None) -> str:
+    """Render an ISO timestamp as "2h ago".
+
+    Falls back to the raw value when it cannot be parsed, so an odd
+    source format never breaks the table.
+    """
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return raw
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    if now is None:
+        now = datetime.now(timezone.utc)
+    seconds = max(0, int((now - stamp).total_seconds()))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    if seconds < 30 * 86400:
+        return f"{seconds // 86400}d ago"
+    return stamp.date().isoformat()
+
+
 def price_table(hit: CardHit, prices: list[Price]) -> Table:
-    table = Table(
-        title=hit.name,
-        title_style="bold gold1",
-        show_header=True,
-        header_style="bold",
-    )
-    table.add_column("Set")
-    table.add_column("Collector #")
+    # No title: print_result already shows the card name above the table.
+    # Market doubles as the source link, so Source folds into it.
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Set", max_width=20, overflow="ellipsis")
+    table.add_column("Collector #", no_wrap=True)
     table.add_column("Finish")
     table.add_column("Market")
     table.add_column("Price", justify="right")
-    table.add_column("As of")
-    table.add_column("Source")
+    table.add_column("As of", no_wrap=True)
     for price in prices:
         table.add_row(
             hit.set_name or hit.set_code,
             hit.collector_number,
             price.printing,
-            price.market,
+            linked(price.market, price.source_url),
             _money(price),
-            price.as_of,
-            linked(price.source, price.source_url),
+            _relative_as_of(price.as_of),
         )
     return table
 
@@ -213,11 +235,26 @@ def watch_table(watches) -> Table:
     return table
 
 
-def _change_text(row) -> str:
+def _check_amount(value: float | None, currency: str) -> Text:
+    """An amount for the check table. Non-USD amounts get their currency
+    code spelled out, so a euro price never sits next to a dollar price
+    unlabeled."""
+    text = Text(_amount(value, currency))
+    if value is not None and currency != "USD":
+        text.append(f" {currency}", style="dim")
+    return text
+
+
+def _change_text(row) -> Text:
     if row.delta_abs is None or row.delta_pct is None:
-        return "n/a"
+        return Text("n/a", style="dim")
+    if row.delta_abs == 0:
+        return Text("no change", style="dim")
     sign = "+" if row.delta_abs >= 0 else "-"
-    return f"{sign}{_amount(abs(row.delta_abs), row.currency)} ({sign}{abs(row.delta_pct):.1f}%)"
+    core = f"{sign}{_amount(abs(row.delta_abs), row.currency)} ({sign}{abs(row.delta_pct):.1f}%)"
+    if row.currency != "USD":
+        core += f" {row.currency}"
+    return Text(core)
 
 
 def _signal_text(row) -> str:
@@ -238,6 +275,7 @@ def _signal_text(row) -> str:
 def check_table(rows) -> Table:
     table = Table(show_header=True, header_style="bold")
     table.add_column("Card")
+    table.add_column("Set")
     table.add_column("Prev", justify="right")
     table.add_column("Now", justify="right")
     table.add_column("Change", justify="right")
@@ -245,17 +283,18 @@ def check_table(rows) -> Table:
     for row in rows:
         watch = row.watch
         card = Text(watch.name)
-        if watch.set_name:
-            card.append(f"  {watch.set_name}", style="dim")
         if row.note:
             card.append(f"\n{row.note}", style="dim")
-        now = _amount(row.current, row.currency) if not row.error else "n/a"
+        now = _check_amount(row.current, row.currency) if not row.error else Text("n/a")
         table.add_row(
             card,
-            _amount(row.previous, row.currency),
+            watch.set_name or "-",
+            _check_amount(row.previous, row.currency),
             now,
             _change_text(row),
             _signal_text(row),
+            # Quiet rows dim out; only movers and target hits demand eyes.
+            style="dim" if not row.alert else None,
         )
     return table
 

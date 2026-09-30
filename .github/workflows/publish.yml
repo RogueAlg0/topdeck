@@ -50,7 +50,7 @@ jobs:
           python -m build --wheel --outdir dist/
           mkdir -p debroot/usr/lib/topdeck/dist vendor
           cp dist/topdeck-${VER}-py3-none-any.whl debroot/usr/lib/topdeck/dist/
-          uv pip download --dest vendor/ "rich>=13"
+          python -m pip download --dest vendor/ "rich>=13" "questionary>=2" "mcp>=2" "tenacity>=9"
           cp vendor/*.whl debroot/usr/lib/topdeck/dist/
       - name: Assemble .deb
         run: |
