@@ -1,0 +1,111 @@
+name: bump-tap
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  bump:
+    name: Open formula-bump PR in the Homebrew tap
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for TAP_BUMP_PAT
+        id: pat
+        env:
+          TAP_BUMP_PAT: ${{ secrets.TAP_BUMP_PAT }}
+        run: |
+          if [ -z "$TAP_BUMP_PAT" ]; then
+            echo "::warning::TAP_BUMP_PAT is not set; skipping tap bump. Create a fine-grained PAT with Contents and Pull requests write on RogueAlg0/homebrew-topdeck-tap and store it as the TAP_BUMP_PAT secret."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compute formula values and open PR
+        if: steps.pat.outputs.skip != 'true'
+        env:
+          TAP_BUMP_PAT: ${{ secrets.TAP_BUMP_PAT }}
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, os, subprocess, time, urllib.request
+
+          ver = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          pat = os.environ["TAP_BUMP_PAT"]
+
+          def pypi_json(pkg):
+              with urllib.request.urlopen(f"https://pypi.org/pypi/{pkg}/json") as r:
+                  return json.load(r)
+
+          # Wait for the new sdist to appear on PyPI (publish job runs first).
+          info = None
+          for _ in range(30):
+              info = pypi_json("topdeck")
+              urls = info["releases"].get(ver, [])
+              sdist = [u for u in urls if u["packagetype"] == "sdist"]
+              if sdist:
+                  break
+              time.sleep(20)
+          else:
+              raise SystemExit(f"sdist for topdeck {ver} never appeared on PyPI")
+
+          def fetch_sha256(url):
+              with urllib.request.urlopen(url) as r:
+                  data = r.read()
+              return hashlib.sha256(data).hexdigest(), url.split("/")[-1]
+
+          sdist_info = sdist[0]
+          topdeck_sha, topdeck_file = fetch_sha256(sdist_info["url"])
+
+          # Resolve the pinned rich release from its own PyPI metadata.
+          rich_meta = pypi_json("rich")
+          rich_version = rich_meta["info"]["version"]
+          rich_sdist = [u for u in rich_meta["releases"][rich_version] if u["packagetype"] == "sdist"][0]
+          rich_sha, rich_file = fetch_sha256(rich_sdist["url"])
+
+          formula = f'''class Topdeck < Formula
+            include Language::Python::Virtualenv
+
+            url "{sdist_info["url"]}"
+            sha256 "{topdeck_sha}"
+
+            depends_on "python@3.13"
+
+            resource "rich" do
+              url "{rich_sdist["url"]}"
+              sha256 "{rich_sha}"
+            end
+
+            def install
+              virtualenv_install_with_resources
+            end
+
+            test do
+              assert_match "{ver}", shell_output("#{{bin}}/topdeck --version")
+            end
+          end
+          '''
+
+          def gh(*args, **kwargs):
+              env = dict(os.environ, GH_TOKEN=pat)
+              return subprocess.run(["gh", *args], check=True, capture_output=True, text=True, env=env, **kwargs)
+
+          subprocess.run(["rm", "-rf", "/tmp/tap"], check=True)
+          gh("repo", "clone", "RogueAlg0/homebrew-topdeck-tap", "/tmp/tap")
+          branch = f"formula-bump-{ver}"
+          subprocess.run(["git", "-C", "/tmp/tap", "checkout", "-b", branch], check=True)
+          with open("/tmp/tap/Formula/topdeck.rb", "w") as f:
+              f.write(formula)
+          subprocess.run(["git", "-C", "/tmp/tap", "add", "Formula/topdeck.rb"], check=True)
+          subprocess.run(
+              ["git", "-C", "/tmp/tap", "-c", "user.name=RogueAlg0",
+               "-c", "user.email=RogueAlg0@users.noreply.github.com",
+               "commit", "-m", f"Bump topdeck formula to {ver}"],
+              check=True,
+          )
+          subprocess.run(["git", "-C", "/tmp/tap", "push", "origin", branch], check=True)
+          gh("pr", "create", "--repo", "RogueAlg0/homebrew-topdeck-tap",
+             "--head", branch, "--base", "main",
+             "--title", f"Bump topdeck formula to {ver}",
+             "--body", f"Updates the Homebrew formula for the {ver} release: sdist URL, sha256, and the --version test string.")
+          print(f"Opened formula-bump PR for {ver}")
+          EOF
