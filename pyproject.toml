@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "topdeck"
+version = "0.1.0"
+description = "Terminal-native TCG price watcher. Track your cards, catch the spikes, never pay full price for cardboard."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["rich>=13"]
+
+[project.scripts]
+topdeck = "topdeck.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["topdeck*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
