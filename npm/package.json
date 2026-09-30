@@ -1,0 +1,41 @@
+{
+  "//": "version must stay in sync with pyproject.toml for every release",
+  "bin": {
+    "topdeck": "./bin/topdeck.js",
+    "topdeck-mcp": "./bin/topdeck-mcp.js"
+  },
+  "bugs": {
+    "url": "https://github.com/RogueAlg0/topdeck/issues"
+  },
+  "description": "Terminal-native TCG price watcher. Topdeck the price.",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "homepage": "https://github.com/RogueAlg0/topdeck",
+  "keywords": [
+    "tcg",
+    "trading-cards",
+    "magic-the-gathering",
+    "pokemon",
+    "lorcana",
+    "cli",
+    "prices"
+  ],
+  "license": "MIT",
+  "name": "topdeck-prices",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RogueAlg0/topdeck.git"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "version": "0.1.0"
+}
