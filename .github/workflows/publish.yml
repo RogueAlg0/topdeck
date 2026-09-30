@@ -96,3 +96,34 @@ jobs:
             gh release create "$TAG" --generate-notes --title "$TAG"
           fi
           gh release upload "$TAG" "topdeck_${VER}_all.deb" --clobber
+
+  npm:
+    name: Publish npm installer (topdeck-prices)
+    runs-on: ubuntu-latest
+    # PyPI must be live first: the npm postinstall step pip-installs the
+    # matching topdeck release from PyPI.
+    needs: pypi
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Check npm and PyPI versions match the tag
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          NPM_VER=$(node -p "require('./npm/package.json').version")
+          if [ "$NPM_VER" != "$VER" ]; then
+            echo "npm/package.json version ($NPM_VER) does not match tag ($VER); refusing to publish."
+            exit 1
+          fi
+      - name: Publish to npm
+        # Needs a repo secret named NPM_TOKEN: a granular npm access token
+        # with publish permission on the topdeck-prices package.
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
