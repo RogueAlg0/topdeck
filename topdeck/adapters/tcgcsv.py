@@ -4,6 +4,10 @@ TCGCSV publishes daily TCGplayer dumps: category -> groups (sets) ->
 products (cards) -> prices. We download each level once a day into the
 HTTP cache and match names locally. marketPrice is preferred; midPrice
 is the fallback when marketPrice is null.
+
+When the price backbone has fresh data for this game, get_prices leads
+with the local sidecar and the live rows supplement it; the join key is
+the TCGCSV productId, which doubles as the card_id.
 """
 
 from __future__ import annotations
@@ -11,8 +15,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from topdeck import net
-from topdeck.adapters.base import CardHit, GameAdapter, Price
+from topdeck import backbone, net
+from topdeck.adapters.base import CardHit, GameAdapter, Price, prices_from_cents, with_sidecar_price
 from topdeck.progress import Progress
 
 _PRINTING_BY_SUBTYPE = {"Normal": "normal", "Foil": "foil"}
@@ -96,6 +100,8 @@ class TcgcsvBulkAdapter(GameAdapter):
         return out
 
     def search(self, query: str) -> list[CardHit]:
+        # Search always runs the live catalog path. The backbone is a
+        # price sidecar, not a second catalog; get_prices decides.
         wanted = query.strip().lower()
         _, products_by_group = self._catalog()
         matched_groups: dict[int, list[dict]] = {}
@@ -129,14 +135,36 @@ class TcgcsvBulkAdapter(GameAdapter):
         return hits
 
     def get_prices(self, hit: CardHit) -> list[Price]:
+        # Backbone rule: a fresh sync leads with the sidecar's USD price
+        # and the live legs supplement it; a miss or stale data falls
+        # back to the live rows the search already fetched. The threshold
+        # lives in backbone.FRESHNESS_HOURS.
+        live = self._live_prices(hit)
+        try:
+            join_key: int | None = int(hit.card_id)
+        except (TypeError, ValueError):
+            join_key = None
+        row = backbone.lookup_price(self.game_key, join_key) if join_key is not None else None
+        if row is None:
+            return live
+        sidecar = prices_from_cents(
+            row["market_cents"],
+            row["mid_cents"],
+            as_of=row["as_of"],
+            source="tcgcsv",
+            source_url="https://tcgcsv.com",
+        )
+        return with_sidecar_price(sidecar, live)
+
+    def _live_prices(self, hit: CardHit) -> list[Price]:
         as_of = datetime.now(timezone.utc).isoformat(timespec="seconds")
         out: list[Price] = []
-        for row in hit.extra.get("prices", []):
-            raw = row.get("marketPrice")
+        for live in hit.extra.get("prices", []):
+            raw = live.get("marketPrice")
             provenance = "market"
             if raw is None:
                 # No market price: fall back to the mid price, but say so.
-                raw = row.get("midPrice")
+                raw = live.get("midPrice")
                 provenance = "mid"
             if raw is None:
                 continue
@@ -144,7 +172,7 @@ class TcgcsvBulkAdapter(GameAdapter):
                 value = float(raw)
             except (TypeError, ValueError):
                 continue
-            printing = _PRINTING_BY_SUBTYPE.get(str(row.get("subTypeName", "")), "normal")
+            printing = _PRINTING_BY_SUBTYPE.get(str(live.get("subTypeName", "")), "normal")
             out.append(
                 Price(
                     market="tcgplayer",

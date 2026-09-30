@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from rich.console import Console
 from rich.panel import Panel
 
-from topdeck import __version__, progress
+from topdeck import __version__, backbone, progress
 from topdeck import adapters as game_adapters
 from topdeck.adapters.base import CardHit, Price
 from topdeck.doctor import check_sources, local_checks
@@ -36,6 +36,8 @@ from topdeck.output import (
     grand_total_lines,
     json_payload,
     print_result,
+    sync_json,
+    sync_table,
     watch_json,
     watch_table,
 )
@@ -174,6 +176,27 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="Check every price source.",
         description="Check every price source and report honestly which are healthy.",
+    )
+
+    sync = sub.add_parser(
+        "sync",
+        help="Download bulk TCGCSV prices into the local database.",
+        description=(
+            "Download TCGCSV's bulk product and price data into a local "
+            "SQLite database, so price lookups serve fresh USD market prices "
+            "without a live fetch per card. `topdeck sync` refreshes all "
+            f"{len(backbone.GAMES)} games; `topdeck sync pokemon` refreshes one. "
+            "Synced data stays fresh for 36 hours, then lookups fall back to "
+            "live fetching until the next sync.\n\n"
+            "There is no in-tool scheduler. Run it from cron instead, e.g.:\n"
+            "  0 6 * * * topdeck sync >/dev/null 2>&1"
+        ),
+    )
+    sync.add_argument(
+        "game",
+        nargs="?",
+        default=None,
+        help="sync one game only (default: all games)",
     )
 
     for name, desc in COMMAND_DESCRIPTIONS.items():
@@ -783,6 +806,26 @@ def cmd_doctor(args: argparse.Namespace, console: Console, as_json: bool) -> int
     return 0
 
 
+def cmd_sync(args: argparse.Namespace, console: Console, as_json: bool) -> int:
+    if args.game is None:
+        games = list(backbone.GAMES)
+    else:
+        key = args.game.strip().lower()
+        key = game_adapters.GAME_ALIASES.get(key, key)
+        if key not in backbone.GAMES:
+            console.print(f'[red]Unknown game "{args.game}".[/red]')
+            console.print(f"Valid games: {', '.join(backbone.GAMES)}")
+            return 2
+        games = [key]
+    # One game's failure never stops the rest; the summary says which.
+    results = [backbone.sync_game(game) for game in games]
+    if as_json:
+        print(sync_json(results))
+    else:
+        console.print(sync_table(results))
+    return 1 if any(not res.ok for res in results) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -805,6 +848,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(args, console, args.json)
     if args.command == "doctor":
         return cmd_doctor(args, console, args.json)
+    if args.command == "sync":
+        return cmd_sync(args, console, args.json)
     return _coming_soon(console, args.command, args.json)
 
 

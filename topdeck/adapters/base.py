@@ -60,6 +60,57 @@ class GameAdapter:
         raise NotImplementedError
 
 
+def prices_from_cents(
+    market_cents: int | None,
+    mid_cents: int | None,
+    *,
+    as_of: str,
+    source: str,
+    source_url: str = "",
+) -> list[Price]:
+    """Build Price rows from backbone integer cents.
+
+    Market cents win; mid cents are the labeled fallback. Both missing
+    means no price at all, never a zero.
+    """
+    raw = market_cents
+    provenance = "market"
+    if raw is None:
+        raw = mid_cents
+        provenance = "mid"
+    if raw is None:
+        return []
+    return [
+        Price(
+            market="tcgplayer",
+            currency="USD",
+            condition="near-mint",
+            printing="normal",
+            price=raw / 100,
+            as_of=as_of,
+            source=source,
+            source_url=source_url,
+            provenance=provenance,
+        )
+    ]
+
+
+def with_sidecar_price(sidecar: list[Price], live: list[Price]) -> list[Price]:
+    """Supplement live price legs with the backbone sidecar's USD row.
+
+    The sidecar stores the headline (tcgplayer, USD, normal) price, so it
+    goes first and the live leg it supersedes is dropped. Every other leg
+    (EUR, foils) is kept as-is, with its own as_of untouched.
+    """
+    if not sidecar:
+        return live
+    return sidecar + [
+        leg
+        for leg in live
+        if (leg.market, leg.currency, leg.printing) != ("tcgplayer", "USD", "normal")
+    ]
+
+
 def _recency_key(released_at: str) -> float:
     """Most recent first. Unknown dates sort last, never crash."""
     try:
