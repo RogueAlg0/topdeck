@@ -8,12 +8,18 @@ is the fallback when marketPrice is null.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from topdeck import net
 from topdeck.adapters.base import CardHit, GameAdapter, Price
+from topdeck.progress import Progress
 
 _PRINTING_BY_SUBTYPE = {"Normal": "normal", "Foil": "foil"}
+
+# Threads for bulk catalog downloads. The per-host politeness throttle in
+# net.fetch_json still paces every request; threads only overlap latency.
+_CATALOG_WORKERS = 8
 
 
 class TcgcsvBulkAdapter(GameAdapter):
@@ -35,13 +41,18 @@ class TcgcsvBulkAdapter(GameAdapter):
     def _catalog(self) -> tuple[list[dict], dict[int, list[dict]]]:
         """Products matching nothing are cheap: price rows are fetched only
         for groups that actually contain a match, so a query never pays
-        for price data it cannot use."""
+        for price data it cannot use.
+
+        Group downloads run on threads; the per-host throttle in
+        net.fetch_json still spaces every request, so this overlaps
+        latency without getting pushy.
+        """
         groups = self._groups()
-        products_by_group: dict[int, list[dict]] = {}
-        for group in groups:
-            group_id = group.get("groupId")
-            if group_id is None:
-                continue
+        targets = [g for g in groups if g.get("groupId") is not None]
+        progress = Progress(f"Fetching {self.display_name} catalog", len(targets))
+
+        def _one(group: dict) -> tuple[int, list[dict]]:
+            group_id = group["groupId"]
             products = net.fetch_json(
                 f"https://tcgcsv.com/tcgplayer/{self.category_id}/{group_id}/products",
                 ttl=self.cache_ttl,
@@ -49,9 +60,17 @@ class TcgcsvBulkAdapter(GameAdapter):
                 user_agent=net.BROWSER_UA,
             )
             prod_rows = products.get("results", []) if isinstance(products, dict) else []
-            products_by_group[group_id] = [p for p in prod_rows if isinstance(p, dict)]
-            for prod in products_by_group[group_id]:
+            rows = [p for p in prod_rows if isinstance(p, dict)]
+            for prod in rows:
                 prod["_group"] = group
+            progress.tick()
+            return group_id, rows
+
+        products_by_group: dict[int, list[dict]] = {}
+        with ThreadPoolExecutor(max_workers=_CATALOG_WORKERS) as pool:
+            for group_id, rows in pool.map(_one, targets):
+                products_by_group[group_id] = rows
+        progress.finish()
         return groups, products_by_group
 
     def _prices_for(self, group_id: int) -> dict[int, list[dict]]:

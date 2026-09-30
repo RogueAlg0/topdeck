@@ -25,7 +25,7 @@ class _Resp:
 def isolated(monkeypatch, tmp_path):
     """Cache in a temp dir, fresh rate-limit state."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    monkeypatch.setattr(net, "_last_call", {})
+    monkeypatch.setattr(net, "_buckets", {})
     return tmp_path
 
 
@@ -39,6 +39,14 @@ def _serve(monkeypatch, payloads):
 
     monkeypatch.setattr(net.urllib.request, "urlopen", fake_open)
     return calls
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Tenacity retries must not slow the suite: waits become instant."""
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda s: None)
 
 
 def test_cache_serves_repeat_lookup_without_refetch(isolated, monkeypatch):
@@ -60,7 +68,7 @@ def test_cache_survives_process_restart(isolated, monkeypatch, tmp_path):
     net.fetch_json("https://x.test/a", ttl=3600)
     assert (tmp_path / "topdeck" / "http_cache.sqlite").exists()
     # new "process": wipe in-memory state, stub the network to explode
-    monkeypatch.setattr(net, "_last_call", {})
+    monkeypatch.setattr(net, "_buckets", {})
 
     def boom(req, timeout=None):
         raise AssertionError("network should not be touched")
@@ -95,7 +103,19 @@ def test_different_hosts_are_not_paced(isolated, monkeypatch):
     assert sleeps == []
 
 
-def test_http_429_becomes_source_error(isolated, monkeypatch):
+def test_rate_change_gets_a_fresh_bucket(isolated, monkeypatch):
+    _serve(monkeypatch, {"https://x.test/a": {"n": 1}})
+    sleeps = []
+    monkeypatch.setattr(net.time, "sleep", lambda s: sleeps.append(s))
+    net.fetch_json("https://x.test/a", ttl=0, min_interval=0.5)
+    net.fetch_json("https://x.test/a", ttl=0, min_interval=0.5)
+    assert len(sleeps) == 1  # paced under the old interval
+    # A new interval means a new bucket, which starts full.
+    net.fetch_json("https://x.test/a", ttl=0, min_interval=5.0)
+    assert len(sleeps) == 1
+
+
+def test_http_429_becomes_source_error(isolated, monkeypatch, no_sleep):
     import urllib.error
 
     def fake_open(req, timeout=None):
@@ -106,7 +126,7 @@ def test_http_429_becomes_source_error(isolated, monkeypatch):
         net.fetch_json("https://x.test/a", ttl=0)
 
 
-def test_unreachable_host_becomes_source_error(isolated, monkeypatch):
+def test_unreachable_host_becomes_source_error(isolated, monkeypatch, no_sleep):
     import urllib.error
 
     def fake_open(req, timeout=None):
@@ -167,7 +187,7 @@ def test_write_cache_without_db_is_quiet(monkeypatch):
     net._write_cache("https://x.test/a", "{}")
 
 
-def test_fetch_json_429_asks_to_slow_down(monkeypatch, isolated):
+def test_fetch_json_429_asks_to_slow_down(monkeypatch, isolated, no_sleep):
     import urllib.error
 
     def boom(req, timeout=None):
@@ -178,7 +198,7 @@ def test_fetch_json_429_asks_to_slow_down(monkeypatch, isolated):
         net.fetch_json("https://x.test/a", ttl=0)
 
 
-def test_fetch_json_http_error_names_status(monkeypatch, isolated):
+def test_fetch_json_http_error_names_status(monkeypatch, isolated, no_sleep):
     import urllib.error
 
     def boom(req, timeout=None):
@@ -196,3 +216,100 @@ def test_fetch_json_garbled_body(monkeypatch, isolated):
     monkeypatch.setattr(net.urllib.request, "urlopen", fake_open)
     with pytest.raises(net.SourceError, match="garbled"):
         net.fetch_json("https://x.test/a", ttl=0)
+
+
+# ---------------------------------------------------------------------------
+# Tenacity retries: transient failures retry, answers never do
+
+
+def _http_error(url, code):
+    import urllib.error
+
+    return urllib.error.HTTPError(url, code, "boom", {}, None)
+
+
+def test_retry_recovers_from_transient_500(isolated, monkeypatch, no_sleep):
+    attempts = []
+
+    def flaky(req, timeout=None):
+        attempts.append(req.full_url)
+        if len(attempts) < 3:
+            raise _http_error(req.full_url, 500)
+        return _Resp(b'{"n": 1}')
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", flaky)
+    assert net.fetch_json("https://x.test/a", ttl=0) == {"n": 1}
+    assert len(attempts) == 3
+
+
+def test_retry_recovers_from_timeout(isolated, monkeypatch, no_sleep):
+    attempts = []
+
+    def flaky(req, timeout=None):
+        attempts.append(req.full_url)
+        if len(attempts) < 2:
+            raise TimeoutError("timed out")
+        return _Resp(b'{"n": 2}')
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", flaky)
+    assert net.fetch_json("https://x.test/a", ttl=0) == {"n": 2}
+    assert len(attempts) == 2
+
+
+def test_retry_gives_up_after_four_attempts(isolated, monkeypatch, no_sleep):
+    attempts = []
+
+    def down(req, timeout=None):
+        attempts.append(req.full_url)
+        raise _http_error(req.full_url, 503)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", down)
+    with pytest.raises(net.SourceError, match="HTTP 503") as excinfo:
+        net.fetch_json("https://x.test/a", ttl=0)
+    assert len(attempts) == 4
+    assert excinfo.value.status == 503
+
+
+def test_no_retry_on_404(isolated, monkeypatch, no_sleep):
+    attempts = []
+
+    def missing(req, timeout=None):
+        attempts.append(req.full_url)
+        raise _http_error(req.full_url, 404)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", missing)
+    with pytest.raises(net.SourceError, match="HTTP 404") as excinfo:
+        net.fetch_json("https://x.test/a", ttl=0)
+    assert len(attempts) == 1
+    assert excinfo.value.status == 404
+
+
+def test_no_retry_on_400(isolated, monkeypatch, no_sleep):
+    attempts = []
+
+    def bad(req, timeout=None):
+        attempts.append(req.full_url)
+        raise _http_error(req.full_url, 400)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", bad)
+    with pytest.raises(net.SourceError) as excinfo:
+        net.fetch_json("https://x.test/a", ttl=0)
+    assert len(attempts) == 1
+    assert excinfo.value.status == 400
+
+
+def test_retries_wait_between_attempts(isolated, monkeypatch):
+    import time
+
+    waits = []
+    monkeypatch.setattr(time, "sleep", lambda s: waits.append(s))
+
+    def down(req, timeout=None):
+        raise _http_error(req.full_url, 500)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", down)
+    with pytest.raises(net.SourceError):
+        net.fetch_json("https://x.test/a", ttl=0)
+    # Three retries, three waits, every one of them positive.
+    assert len(waits) == 3
+    assert all(w > 0 for w in waits)

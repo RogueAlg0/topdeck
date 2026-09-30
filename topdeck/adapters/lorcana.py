@@ -8,10 +8,12 @@ source, so only the standard price is reported.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from topdeck import net
 from topdeck.adapters.base import CardHit, GameAdapter, Price
+from topdeck.progress import Progress
 
 
 class LorcastAdapter(GameAdapter):
@@ -29,20 +31,28 @@ class LorcastAdapter(GameAdapter):
             min_interval=self.min_interval,
         )
         sets = payload.get("results", []) if isinstance(payload, dict) else []
-        cards: list[dict] = []
-        for s in sets:
-            code = s.get("code")
-            if not code:
-                continue
+        targets = [s for s in sets if s.get("code")]
+        progress = Progress(f"Fetching {self.display_name} card lists", len(targets))
+
+        def _one(s: dict) -> list[dict]:
             batch = net.fetch_json(
-                f"https://api.lorcast.com/v0/sets/{code}/cards",
+                f"https://api.lorcast.com/v0/sets/{s['code']}/cards",
                 ttl=self.cache_ttl,
                 min_interval=self.min_interval,
             )
             items = batch if isinstance(batch, list) else []
             for card in items:
                 card["_set"] = s
-                cards.append(card)
+            progress.tick()
+            return items
+
+        cards: list[dict] = []
+        # Threads overlap latency; the per-host throttle in net.fetch_json
+        # still spaces every request.
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for items in pool.map(_one, targets):
+                cards.extend(items)
+        progress.finish()
         return cards
 
     def search(self, query: str) -> list[CardHit]:

@@ -203,3 +203,26 @@ def test_watch_summary_count_failure(monkeypatch):
 
     monkeypatch.setattr(doctor, "WatchStore", lambda: BadStore())
     assert doctor._watch_summary() == "unreadable"
+
+
+def test_check_sources_probes_in_parallel(monkeypatch):
+    """Five overlapping probes must use five threads: a barrier only that
+    many distinct threads can pass proves the probes run together."""
+    import threading
+
+    barrier = threading.Barrier(5, timeout=10)
+    seen = set()
+    lock = threading.Lock()
+
+    def overlapping(url, user_agent):
+        with lock:
+            seen.add(threading.get_ident())
+        barrier.wait()
+        return True, 120, "responding"
+
+    monkeypatch.setattr(doctor, "_probe", overlapping)
+    results = doctor.check_sources()
+    # pool.map keeps _PROBES order, so the report reads the same every time.
+    assert [r.game for r in results] == ["mtg", "pokemon", "lorcana", "onepiece", "riftbound"]
+    assert all(r.status == "ok" for r in results)
+    assert len(seen) == 5

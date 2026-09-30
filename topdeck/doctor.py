@@ -12,6 +12,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from topdeck import net
@@ -68,29 +69,38 @@ def _probe(url: str, user_agent: str = _UA) -> tuple[bool, int | None, str]:
     return True, elapsed_ms, "responding"
 
 
+def _check_one_probe(
+    probe: tuple[str, str, str, str],
+) -> SourceHealth:
+    """Probe one source. Never raises; a dead source is a row, not an error."""
+    game, display_name, source, url = probe
+    user_agent = net.BROWSER_UA if "tcgcsv.com" in url else _UA
+    healthy, latency_ms, detail = _probe(url, user_agent)
+    if not healthy:
+        status = "down"
+    elif latency_ms is not None and latency_ms >= _SLOW_AFTER * 1000:
+        status = "slow"
+    else:
+        status = "ok"
+    return SourceHealth(
+        game=game,
+        display_name=display_name,
+        source=source,
+        status=status,
+        latency_ms=latency_ms,
+        detail=detail,
+    )
+
+
 def check_sources() -> list[SourceHealth]:
-    """Probe every game's price source. Slow or dead sources are rows, not errors."""
-    results: list[SourceHealth] = []
-    for game, display_name, source, url in _PROBES:
-        user_agent = net.BROWSER_UA if "tcgcsv.com" in url else _UA
-        healthy, latency_ms, detail = _probe(url, user_agent)
-        if not healthy:
-            status = "down"
-        elif latency_ms is not None and latency_ms >= _SLOW_AFTER * 1000:
-            status = "slow"
-        else:
-            status = "ok"
-        results.append(
-            SourceHealth(
-                game=game,
-                display_name=display_name,
-                source=source,
-                status=status,
-                latency_ms=latency_ms,
-                detail=detail,
-            )
-        )
-    return results
+    """Probe every game's price source. Slow or dead sources are rows, not errors.
+
+    Probes run on threads so one slow source cannot stall the rest.
+    pool.map preserves _PROBES order, so the report reads the same
+    every time.
+    """
+    with ThreadPoolExecutor(max_workers=len(_PROBES)) as pool:
+        return list(pool.map(_check_one_probe, _PROBES))
 
 
 def _cache_summary() -> str:

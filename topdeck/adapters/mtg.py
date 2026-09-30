@@ -32,7 +32,14 @@ class ScryfallAdapter(GameAdapter):
 
     def search(self, query: str) -> list[CardHit]:
         url = "https://api.scryfall.com/cards/search?q=" + urllib.parse.quote(query)
-        data = net.fetch_json(url, ttl=self.cache_ttl, min_interval=self.min_interval)
+        try:
+            data = net.fetch_json(url, ttl=self.cache_ttl, min_interval=self.min_interval)
+        except net.SourceError as exc:
+            if exc.status == 404:
+                # Scryfall answers "no such card" with a 404, not an
+                # empty list. That is a no-match, not an outage.
+                return []
+            raise
         hits: list[CardHit] = []
         cards = data.get("data", []) if isinstance(data, dict) else []
         for card in cards[:15]:
