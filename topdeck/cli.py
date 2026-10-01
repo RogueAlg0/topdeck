@@ -40,6 +40,7 @@ from topdeck.output import (
     print_result,
     sync_json,
     sync_table,
+    trade_json,
     watch_json,
     watch_table,
 )
@@ -356,6 +357,45 @@ def build_parser() -> argparse.ArgumentParser:
         action for action in sub._choices_actions if action.dest != "completions"
     ]
 
+    trade = sub.add_parser(
+        "trade",
+        help="Judge whether a trade is fair.",
+        description=(
+            "Price two sets of cards and judge whether the trade is fair: "
+            "per-card values, side totals, the difference in dollars and "
+            "percent, and a verdict. Quote multi-word card names."
+        ),
+    )
+    trade.add_argument(
+        "cards",
+        nargs="+",
+        help='cards you give, e.g. topdeck trade "Lightning Bolt" --for "Black Lotus"',
+    )
+    trade.add_argument(
+        "--for",
+        dest="for_cards",
+        nargs="+",
+        required=True,
+        help="cards you receive",
+    )
+    trade.add_argument(
+        "--game",
+        default="mtg",
+        help="which game (default: mtg)",
+    )
+    trade.add_argument(
+        "--pick",
+        type=int,
+        default=None,
+        metavar="N",
+        help="choose match number N instead of being asked (applies to every card)",
+    )
+    trade.add_argument(
+        "--yes",
+        action="store_true",
+        help=("take the recommended match for every card and skip the unpriced-card confirmation"),
+    )
+
     return parser
 
 
@@ -446,6 +486,56 @@ def _did_you_mean(adapter, query: str) -> str:
     return f" Did you mean: {names}?"
 
 
+def _resolve_card(adapter, query: str, console: Console, *, pick=None, first=False, as_json=False):
+    """Search, rank, and pick one card, exactly like `price` does.
+
+    Returns (chosen, ranked, alternatives, recommended, exit_code):
+    exit_code is 0 on success and the first four are None when
+    resolution failed, in which case the same message `price` would
+    print is already printed. Shared by `price` and `trade` so picking
+    a card never drifts between the two.
+    """
+    try:
+        hits = adapter.search(query)
+    except SourceError as exc:
+        console.print(f"[red]Could not look that up: {exc}[/red]")
+        return None, None, None, None, 1
+    if not hits:
+        console.print(
+            f'No matches for "{query}" in {adapter.display_name}.'
+            f"{_did_you_mean(adapter, query)}"
+            " Try a shorter query or check the spelling."
+        )
+        return None, None, None, None, 0
+
+    ranked = game_adapters.rank_candidates(hits, query)
+    alternatives: list = []
+    recommended = True
+
+    if len(ranked) == 1:
+        chosen = ranked[0]
+    elif pick is not None:
+        if not 1 <= pick <= len(ranked):
+            console.print(
+                f"[red]--pick {pick} is out of range. "
+                f"There are {len(ranked)} matches; pick 1 to {len(ranked)}.[/red]"
+            )
+            return None, None, None, None, 2
+        chosen = ranked[pick - 1]
+        recommended = pick == 1
+        alternatives = [h for h in ranked if h is not chosen]
+    elif first or as_json or not _is_interactive():
+        chosen = ranked[0]
+        alternatives = ranked[1:]
+    else:
+        picked = interactive_pick(console, ranked, query)
+        if picked is None:
+            return None, None, None, None, 1
+        chosen = picked
+        recommended = chosen is ranked[0]
+    return chosen, ranked, alternatives, recommended, 0
+
+
 def cmd_price(args: argparse.Namespace, console: Console) -> int:
     adapter = game_adapters.resolve_game(args.game)
     if adapter is None:
@@ -456,44 +546,16 @@ def cmd_price(args: argparse.Namespace, console: Console) -> int:
     if args.file is not None or not args.query:
         return cmd_price_from_list(args, adapter, console)
     query = " ".join(args.query).strip()
-    try:
-        hits = adapter.search(query)
-    except SourceError as exc:
-        console.print(f"[red]Could not look that up: {exc}[/red]")
-        return 1
-    if not hits:
-        console.print(
-            f'No matches for "{query}" in {adapter.display_name}.'
-            f"{_did_you_mean(adapter, query)}"
-            " Try a shorter query or check the spelling."
-        )
-        return 0
-
-    ranked = game_adapters.rank_candidates(hits, query)
-    alternatives: list = []
-    recommended = True
-
-    if len(ranked) == 1:
-        chosen = ranked[0]
-    elif args.pick is not None:
-        if not 1 <= args.pick <= len(ranked):
-            console.print(
-                f"[red]--pick {args.pick} is out of range. "
-                f"There are {len(ranked)} matches; pick 1 to {len(ranked)}.[/red]"
-            )
-            return 2
-        chosen = ranked[args.pick - 1]
-        recommended = args.pick == 1
-        alternatives = [h for h in ranked if h is not chosen]
-    elif args.first or args.json or not _is_interactive():
-        chosen = ranked[0]
-        alternatives = ranked[1:]
-    else:
-        picked = interactive_pick(console, ranked, query)
-        if picked is None:
-            return 1
-        chosen = picked
-        recommended = chosen is ranked[0]
+    chosen, ranked, alternatives, recommended, exit_code = _resolve_card(
+        adapter,
+        query,
+        console,
+        pick=args.pick,
+        first=args.first,
+        as_json=args.json,
+    )
+    if chosen is None:
+        return exit_code
 
     try:
         prices = adapter.get_prices(chosen)
@@ -1293,6 +1355,116 @@ def cmd_completions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _trade_verdict(total_a: float, total_b: float) -> str:
+    """Fairness verdict for two side totals.
+
+    "Fair trade" when the gap fits inside $1 or 5% of the larger side,
+    whichever is wider; otherwise which side is up, by dollars and by
+    percent of the larger side. With no priced card on either side there
+    is nothing to judge.
+    """
+    larger = max(total_a, total_b)
+    if larger == 0:
+        return "Cannot judge: no priced cards."
+    diff = abs(total_a - total_b)
+    pct = diff / larger * 100
+    if diff <= max(1.0, 0.05 * larger):
+        return "Fair trade"
+    side = "A" if total_a > total_b else "B"
+    return f"Side {side} is up ${diff:.2f} ({pct:.1f}%)"
+
+
+def _trade_value(prices: list[Price]) -> float | None:
+    """One card's trade value: the tracked price leg, USD only.
+
+    pick_tracked_price is the codebase's canonical "the price of a
+    card" (USD first, then tcgplayer, then normal). Non-USD legs are
+    excluded first: summing euros as dollars would lie quietly.
+    """
+    leg = pick_tracked_price([p for p in prices if p.currency == "USD"])
+    return leg.price if leg is not None else None
+
+
+def cmd_trade(args: argparse.Namespace, console: Console) -> int:
+    """Price two sets of cards and judge whether the trade is fair."""
+    adapter = game_adapters.resolve_game(args.game)
+    if adapter is None:
+        console.print(f'[red]Unknown game "{args.game}".[/red]')
+        console.print(f"Valid games: {_game_list()}")
+        return 2
+    _maybe_auto_sync(adapter, args.json)
+    sides: list[tuple[str, list[tuple[CardHit, float | None]]]] = []
+    for label, names in (("A", args.cards), ("B", args.for_cards)):
+        cards: list[tuple[CardHit, float | None]] = []
+        for name in names:
+            chosen, _, _, _, exit_code = _resolve_card(
+                adapter,
+                name,
+                console,
+                pick=args.pick,
+                first=args.yes,
+                as_json=args.json,
+            )
+            if chosen is None:
+                return exit_code
+            try:
+                prices = adapter.get_prices(chosen)
+            except SourceError as exc:
+                console.print(f"[red]Could not fetch prices: {exc}[/red]")
+                return 1
+            cards.append((chosen, _trade_value(prices)))
+        sides.append((label, cards))
+
+    totals = [sum(value for _, value in cards if value is not None) for _, cards in sides]
+    verdict = _trade_verdict(totals[0], totals[1])
+    warnings = [
+        f'No price for "{hit.name}": excluded from the total.'
+        for _, cards in sides
+        for hit, value in cards
+        if value is None
+    ]
+
+    if args.json:
+        # Plain print, not rich: machine output must not be wrapped.
+        print(
+            trade_json(
+                game=adapter.game_key,
+                sides=sides,
+                totals=totals,
+                verdict=verdict,
+                warnings=warnings,
+            )
+        )
+        return 0
+
+    for (label, cards), total in zip(sides, totals):
+        noun = "card" if len(cards) == 1 else "cards"
+        console.print(f"[bold]Side {label}[/bold] ({len(cards)} {noun}):")
+        for hit, value in cards:
+            amount = f"${value:.2f}" if value is not None else "n/a"
+            console.print(f"  {hit.name}  [dim]{hit.set_name or hit.set_code}[/dim]  {amount}")
+        console.print(f"  Total: ${total:.2f}")
+    for warning in warnings:
+        console.print(f"[dim]{warning}[/dim]")
+    if warnings and not args.yes and _is_interactive():
+        answer = console.input("Some cards have no price. Proceed anyway? [y/N] ").strip().lower()
+        if answer != "y":
+            console.print("Trade evaluation cancelled.")
+            return 1
+    larger = max(totals[0], totals[1])
+    if larger:
+        diff = abs(totals[0] - totals[1])
+        console.print(f"Difference: ${diff:.2f} ({diff / larger * 100:.1f}%)")
+    console.print()
+    if verdict == "Fair trade":
+        console.print("[bold green]Fair trade[/bold green]")
+    elif verdict.startswith("Cannot judge"):
+        console.print(f"[dim]{verdict}[/dim]")
+    else:
+        console.print(f"[bold yellow]{verdict}[/bold yellow]")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1328,6 +1500,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_portfolio_list(args, console, args.json)
     if args.command == "completions":
         return cmd_completions(args)
+    if args.command == "trade":
+        return cmd_trade(args, console)
     # Unreachable through argparse (unknown subcommands are rejected
     # before dispatch). It stays as a backstop: a subcommand added to
     # the parser but forgotten here must fail loudly, not fall through.

@@ -376,6 +376,36 @@ def json_payload(
     return json.dumps(payload, indent=2)
 
 
+def trade_json(
+    *,
+    game: str,
+    sides: list[tuple[str, list[tuple[CardHit, float | None]]]],
+    totals: list[float],
+    verdict: str,
+    warnings: list[str],
+) -> str:
+    """Machine-readable trade evaluation: per-card values, totals, difference, verdict.
+
+    sides is [(label, [(hit, value), ...]), ...] with value None for
+    unpriced cards. difference_pct is None when neither side has a
+    priced card.
+    """
+    larger = max(totals) if totals else 0
+    diff = abs(totals[0] - totals[1]) if len(totals) == 2 else 0
+    payload: dict = {
+        "game": game,
+        "side_a": [{"card": _hit_dict(hit), "value": value} for hit, value in sides[0][1]],
+        "side_b": [{"card": _hit_dict(hit), "value": value} for hit, value in sides[1][1]],
+        "total_a": round(totals[0], 2),
+        "total_b": round(totals[1], 2),
+        "difference": round(diff, 2),
+        "difference_pct": round(diff / larger * 100, 1) if larger else None,
+        "verdict": verdict,
+        "warnings": warnings,
+    }
+    return json.dumps(payload, indent=2)
+
+
 def print_result(
     console: Console,
     *,
