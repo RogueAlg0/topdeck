@@ -2,7 +2,7 @@
 
 import argparse
 import json
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -341,7 +341,7 @@ def _seed_history(monkeypatch, tmp_path):
     from topdeck import backbone
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
 
     def days_ago(n):
         return (today - timedelta(days=n)).strftime("%Y-%m-%d")
