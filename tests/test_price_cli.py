@@ -1,13 +1,13 @@
 """Tests for `topdeck price`, with a fake game so no network is needed."""
 
+import argparse
 import json
 
 import pytest
 
 import topdeck.cli
-from topdeck import __version__
 from topdeck.adapters.base import CardHit, Price
-from topdeck.cli import COMMAND_DESCRIPTIONS, main
+from topdeck.cli import main
 from topdeck.net import SourceError
 
 
@@ -205,18 +205,33 @@ def test_help_lists_price(capsys):
     assert "price" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("command", list(COMMAND_DESCRIPTIONS))
-def test_stub_subcommand_exits_zero(command, capsys):
-    assert main([command]) == 0
-    assert "workbench" in capsys.readouterr().out
+def test_ev_stub_is_gone(capsys):
+    """The unimplemented `ev` subcommand is not registered: argparse
+    rejects it, and the help's command list names no `ev`."""
+    with pytest.raises(SystemExit) as exc:
+        main(["ev"])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
+    first_words = {line.split()[0] for line in capsys.readouterr().out.splitlines() if line.split()}
+    assert "ev" not in first_words
 
 
-@pytest.mark.parametrize("command", list(COMMAND_DESCRIPTIONS))
-def test_stub_json_output_parses(command, capsys):
-    assert main(["--json", command]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "coming_soon"
-    assert payload["version"] == __version__
+def test_dispatch_backstop_for_unknown_command(monkeypatch):
+    """argparse rejects unknown subcommands before dispatch, so the
+    fallthrough is unreachable in practice; it exists so a subcommand
+    added to the parser but forgotten in dispatch fails loudly."""
+    parser = topdeck.cli.build_parser()
+    monkeypatch.setattr(
+        parser,
+        "parse_args",
+        lambda argv=None: argparse.Namespace(command="nope", json=False),
+    )
+    monkeypatch.setattr(topdeck.cli, "build_parser", lambda: parser)
+    with pytest.raises(AssertionError, match="dispatch fell through"):
+        main([])
 
 
 def test_no_command_prints_help(capsys):

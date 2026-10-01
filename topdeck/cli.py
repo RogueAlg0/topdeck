@@ -1,14 +1,12 @@
 """Command line interface for topdeck.
 
 `price`, `watch`, `check`, `doctor`, `sync`, and `portfolio` are live.
-The remaining subcommand (`ev`) lands with its milestone; until then
-it explains itself and exits cleanly. No telemetry.
+No telemetry.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import re
 import sqlite3
@@ -18,7 +16,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from rich.console import Console
-from rich.panel import Panel
 
 from topdeck import __version__, alerts, backbone, output, progress, trigrams
 from topdeck import adapters as game_adapters
@@ -50,10 +47,6 @@ from topdeck.pick import interactive_pick
 from topdeck.portfolio import PortfolioStore, join_key_for, price_holding, summarize
 from topdeck.progress import Progress
 from topdeck.watch import WatchStore, build_row, pick_tracked_price
-
-COMMAND_DESCRIPTIONS = {
-    "ev": "Compute the expected value of opening a pack or box.",
-}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -341,36 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="lot ID or card name",
     )
 
-    for name, desc in COMMAND_DESCRIPTIONS.items():
-        sub.add_parser(name, help=desc, description=desc)
     return parser
-
-
-def _coming_soon(console: Console, command: str, as_json: bool) -> int:
-    """Stub output for subcommands whose milestone has not landed yet."""
-    if as_json:
-        console.print(
-            json.dumps(
-                {
-                    "command": command,
-                    "status": "coming_soon",
-                    "version": __version__,
-                    "detail": COMMAND_DESCRIPTIONS[command],
-                }
-            )
-        )
-        return 0
-    console.print(
-        Panel(
-            f"[bold]{command}[/bold] is still on the workbench.\n\n"
-            f"{COMMAND_DESCRIPTIONS[command]}\n\n"
-            "It is on the roadmap and it will get here. "
-            "For now, `topdeck price` is the one that works.",
-            title="topdeck",
-            border_style="gold1",
-        )
-    )
-    return 0
 
 
 def _game_list() -> str:
@@ -1323,7 +1287,10 @@ def main(argv: list[str] | None = None) -> int:
         if action == "remove":
             return cmd_portfolio_remove(args, console, args.json)
         return cmd_portfolio_list(args, console, args.json)
-    return _coming_soon(console, args.command, args.json)
+    # Unreachable through argparse (unknown subcommands are rejected
+    # before dispatch). It stays as a backstop: a subcommand added to
+    # the parser but forgotten here must fail loudly, not fall through.
+    raise AssertionError(f"dispatch fell through on {args.command!r}")
 
 
 if __name__ == "__main__":
