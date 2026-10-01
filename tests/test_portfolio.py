@@ -482,7 +482,8 @@ def test_portfolio_list_empty_json(store, capsys):
     assert payload["summary"]["total_lots"] == 0
 
 
-def test_portfolio_list_shows_totals_and_holdings(store, fake, fresh_sync, capsys):
+def test_portfolio_list_shows_totals_and_holdings(store, fake, fresh_sync, capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "120")  # hermetic table width, no mid-word wraps
     fake.hits = [_hit()]
     fake.prices = {"card-1": [_price(1.50)]}
     store.add("mtg", "card-1", 123, "Lightning Bolt", "Alpha", 4, 1.00)
@@ -495,7 +496,8 @@ def test_portfolio_list_shows_totals_and_holdings(store, fake, fresh_sync, capsy
     assert "sidecar stale" not in out
 
 
-def test_portfolio_list_marks_stale_sidecar(store, fake, stale_sync, capsys):
+def test_portfolio_list_marks_stale_sidecar(store, fake, stale_sync, capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "120")  # hermetic table width, no mid-word wraps
     fake.hits = [_hit()]
     fake.prices = {"card-1": [_price(1.50)]}
     store.add("mtg", "card-1", 123, "Lightning Bolt", "Alpha", 4, 1.00)

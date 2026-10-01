@@ -179,21 +179,59 @@ def test_price_lookup_prices_error(monkeypatch):
     assert "exploded" in out["error"]
 
 
-def test_main_runs_the_server(monkeypatch):
+@pytest.fixture
+def mcp_server_with_extra(monkeypatch):
+    """Re-import topdeck.mcp_server with a fake `mcp` package installed, as if
+    the optional extra were present. The MCPServer-present path (tool
+    registration, main() running the server) is covered hermetically even in
+    environments without the real extra. monkeypatch restores sys.modules."""
+    import importlib
+    import sys
+    import types
+
+    class FakeMCPServer:
+        def __init__(self, name):
+            self.name = name
+            self.tools = []
+
+        def tool(self):
+            def deco(fn):
+                self.tools.append(fn)
+                return fn
+
+            return deco
+
+        def run(self):
+            raise AssertionError("must be patched")
+
+    pkg = types.ModuleType("mcp")
+    server_pkg = types.ModuleType("mcp.server")
+    mcpserver_mod = types.ModuleType("mcp.server.mcpserver")
+    mcpserver_mod.MCPServer = FakeMCPServer
+    server_pkg.mcpserver = mcpserver_mod
+    pkg.server = server_pkg
+    monkeypatch.setitem(sys.modules, "mcp", pkg)
+    monkeypatch.setitem(sys.modules, "mcp.server", server_pkg)
+    monkeypatch.setitem(sys.modules, "mcp.server.mcpserver", mcpserver_mod)
+    monkeypatch.delitem(sys.modules, "topdeck.mcp_server", raising=False)
+    return importlib.import_module("topdeck.mcp_server")
+
+
+def test_main_runs_the_server(mcp_server_with_extra, monkeypatch):
     calls = []
-    monkeypatch.setattr(mcp_server.mcp, "run", lambda: calls.append(1))
-    mcp_server.main()
+    monkeypatch.setattr(mcp_server_with_extra.mcp, "run", lambda: calls.append(1))
+    mcp_server_with_extra.main()
     assert calls == [1]
+    assert mcp_server_with_extra.mcp.name == "topdeck"
+    assert len(mcp_server_with_extra.mcp.tools) == 2
 
 
-def test_module_main_guard_runs_server(monkeypatch):
+def test_module_main_guard_runs_server(mcp_server_with_extra, monkeypatch):
     """The `python -m topdeck.mcp_server` entry point calls main()."""
     import runpy
 
-    from mcp.server.mcpserver import MCPServer
-
     calls = []
-    monkeypatch.setattr(MCPServer, "run", lambda self: calls.append(1))
+    monkeypatch.setattr(mcp_server_with_extra.MCPServer, "run", lambda self: calls.append(1))
     runpy.run_module("topdeck.mcp_server", run_name="__main__", alter_sys=True)
     assert calls == [1]
 

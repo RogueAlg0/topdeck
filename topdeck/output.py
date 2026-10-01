@@ -56,7 +56,10 @@ def _relative_as_of(raw: str, now: datetime | None = None) -> str:
     source format never breaks the table.
     """
     try:
-        stamp = datetime.fromisoformat(raw)
+        # fromisoformat() only learned the "Z" suffix in 3.11; translate it
+        # so Zulu timestamps parse on every Python we support.
+        text = raw[:-1] + "+00:00" if isinstance(raw, str) and raw.endswith("Z") else raw
+        stamp = datetime.fromisoformat(text)
     except (ValueError, TypeError):
         return raw
     if stamp.tzinfo is None:

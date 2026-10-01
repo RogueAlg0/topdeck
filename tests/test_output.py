@@ -175,6 +175,7 @@ def test_relative_as_of_renders_human_times():
         ("2026-09-30T12:00:30+00:00", "just now"),  # future stamp: clock skew
         ("2026-09-30T12:00:00", "just now"),  # naive stamp read as UTC
         ("2026-09-30T11:55:00+00:00", "5m ago"),
+        ("2026-09-30T11:55:00Z", "5m ago"),  # Zulu parses on every supported Python
         ("2026-09-30T10:00:00+00:00", "2h ago"),
         ("2026-09-27T12:00:00+00:00", "3d ago"),
         ("2026-08-01T12:00:00+00:00", "2026-08-01"),
