@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from rich.console import Console
 
-from topdeck import __version__, alerts, backbone, output, progress, trigrams
+from topdeck import __version__, alerts, backbone, completions, output, progress, trigrams
 from topdeck import adapters as game_adapters
 from topdeck.adapters.base import CardHit, Price
 from topdeck.doctor import check_sources, local_checks
@@ -333,6 +333,28 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="lot ID or card name",
     )
+
+    completions_cmd = sub.add_parser(
+        "completions",
+        help=argparse.SUPPRESS,
+        description=(
+            "Print a shell completion script, generated from the live CLI "
+            "definition so it never drifts. Source it from your shell "
+            'startup, e.g.: eval "$(topdeck completions bash)".'
+        ),
+    )
+    completions_cmd.add_argument(
+        "shell",
+        choices=["bash", "zsh", "fish"],
+        help="which shell to generate completions for",
+    )
+    # help=SUPPRESS only suppresses the help text; the command name
+    # still shows up in the command list (as "==SUPPRESS=="), so drop
+    # its entry from the subparsers' choice list to hide it properly.
+    # _choices_actions is private but stable across 3.10-3.13.
+    sub._choices_actions = [
+        action for action in sub._choices_actions if action.dest != "completions"
+    ]
 
     return parser
 
@@ -1265,6 +1287,12 @@ def cmd_portfolio_remove(args: argparse.Namespace, console: Console, as_json: bo
     return 0
 
 
+def cmd_completions(args: argparse.Namespace) -> int:
+    """Print the completion script for one shell, generated from the live parser."""
+    print(completions.generate(args.shell), end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1298,6 +1326,8 @@ def main(argv: list[str] | None = None) -> int:
         if action == "remove":
             return cmd_portfolio_remove(args, console, args.json)
         return cmd_portfolio_list(args, console, args.json)
+    if args.command == "completions":
+        return cmd_completions(args)
     # Unreachable through argparse (unknown subcommands are rejected
     # before dispatch). It stays as a backstop: a subcommand added to
     # the parser but forgotten here must fail loudly, not fall through.
