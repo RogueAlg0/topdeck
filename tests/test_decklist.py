@@ -92,6 +92,16 @@ def batch_game(monkeypatch):
     return adapter
 
 
+@pytest.fixture(autouse=True)
+def _no_auto_sync(monkeypatch):
+    """Auto-sync is covered by its own tests in test_backbone.py.
+
+    These tests use a fake game with no sync history, so without this
+    every price lookup here would attempt a real network sync.
+    """
+    monkeypatch.setattr(topdeck.cli, "_maybe_auto_sync", lambda adapter, as_json: None)
+
+
 def _deck(tmp_path, text):
     deck = tmp_path / "deck.txt"
     deck.write_text(text)

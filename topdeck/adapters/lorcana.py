@@ -86,6 +86,11 @@ class LorcastAdapter(GameAdapter):
                 break
         return hits
 
+    def history_key(self, hit: CardHit) -> int | None:
+        """The TCGplayer product ID is the history join key."""
+        key = hit.extra.get("tcgplayer_id")
+        return key if isinstance(key, int) else None
+
     def get_prices(self, hit: CardHit) -> list[Price]:
         # Backbone rule: a fresh sync leads with the sidecar's USD price
         # and the live legs supplement it; a miss or stale data falls
@@ -94,15 +99,19 @@ class LorcastAdapter(GameAdapter):
         join_key = hit.extra.get("tcgplayer_id")
         row = backbone.lookup_price(self.game_key, join_key) if isinstance(join_key, int) else None
         if row is None:
-            return live
-        sidecar = prices_from_cents(
-            row["market_cents"],
-            row["mid_cents"],
-            as_of=row["as_of"],
-            source="tcgcsv",
-            source_url="https://tcgcsv.com",
-        )
-        return with_sidecar_price(sidecar, live)
+            prices = live
+        else:
+            sidecar = prices_from_cents(
+                row["market_cents"],
+                row["mid_cents"],
+                as_of=row["as_of"],
+                source="tcgcsv",
+                source_url="https://tcgcsv.com",
+            )
+            prices = with_sidecar_price(sidecar, live)
+        # The price is already fetched; filing the snapshot is free.
+        backbone.record_lookup(self.game_key, join_key, prices)
+        return prices
 
     def _live_prices(self, hit: CardHit) -> list[Price]:
         raw = hit.extra.get("usd")

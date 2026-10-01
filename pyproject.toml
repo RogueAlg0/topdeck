@@ -9,7 +9,12 @@ description = "Terminal-native TCG price watcher. Track your cards, catch the sp
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["rich>=13", "questionary>=2", "mcp>=2", "tenacity>=9"]
+dependencies = ["rich>=13", "questionary>=2", "tenacity>=9"]
+
+[project.optional-dependencies]
+# The MCP server is an optional extra so the base install stays light.
+# `pip install topdeck[mcp]` adds the MCP stack (~65MB) and the tools below.
+mcp = ["mcp>=2"]
 
 [project.scripts]
 topdeck = "topdeck.cli:main"

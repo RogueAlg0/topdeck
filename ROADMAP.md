@@ -4,11 +4,11 @@ Where topdeck is headed, in plain terms. Dates are not promises; direction is.
 
 ## 0.1: Look it up, watch it, trust it
 
-The first real milestone proves the whole loop across all five games: Magic, Pokemon, Lorcana, One Piece, and Riftbound. One-shot price lookups from free sources, from the terminal, with no account and no key. Watchlists that remember your cards, target prices that alert you when a card drops to your number, and a `check` command that re-prices everything and flags the spikes and drops. A `doctor` command reports honestly which price sources are healthy and which are down. The point of 0.1 is proof: real data, real tracking, from your terminal.
+The first real milestone proves the whole loop across all five games: Magic, Pokemon, Lorcana, One Piece, and Riftbound. One-shot price lookups from free sources, from the terminal, with no account and no key. Watchlists that remember your cards, target prices that alert you when a card drops to your number, and a `check` command that re-prices everything and flags the spikes and drops. A `doctor` command reports honestly which price sources are healthy and which are down. A `portfolio` command tracks what you own and reports its current value with unrealized profit and loss. The point of 0.1 is proof: real data, real tracking, from your terminal.
 
 ## 0.2-0.3: Watch it daily
 
-Once tracking works, topdeck gets better at remembering: daily price refreshes, history sparklines in the terminal, a market movers view for the day's biggest swings, and a portfolio that tracks what you own with profit and loss.
+Once tracking works, topdeck gets better at remembering: daily price refreshes, history sparklines in the terminal, a market movers view for the day's biggest swings, and portfolio history over time.
 
 ## 0.4-0.5: Smarter buying
 

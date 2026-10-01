@@ -10,9 +10,10 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from topdeck.adapters.base import Price
+from topdeck.alerts import SmartAlert
 
 #: A move counts as a spike or a drop at this percent change.
 SPIKE_PCT = 10.0
@@ -63,12 +64,13 @@ class CheckRow:
     spike: bool
     drop: bool
     target_hit: bool
+    smart_alerts: list[SmartAlert] = field(default_factory=list)
     error: str | None = None
     note: str | None = None
 
     @property
     def alert(self) -> bool:
-        return bool(self.spike or self.drop or self.target_hit or self.error)
+        return bool(self.spike or self.drop or self.target_hit or self.error or self.smart_alerts)
 
 
 class WatchStore:
@@ -302,6 +304,7 @@ def build_row(
     source: str,
     error: str | None = None,
     note: str | None = None,
+    smart_alerts: list[SmartAlert] | None = None,
 ) -> CheckRow:
     delta_abs, delta_pct, spike, drop = describe_move(previous, current)
     target_hit = (
@@ -318,6 +321,7 @@ def build_row(
         spike=spike,
         drop=drop,
         target_hit=target_hit,
+        smart_alerts=smart_alerts or [],
         error=error,
         note=note,
     )

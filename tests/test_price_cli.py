@@ -52,6 +52,9 @@ class FakeAdapter:
     def get_prices(self, hit):
         return [_price()]
 
+    def history_key(self, hit):
+        return None
+
 
 @pytest.fixture
 def fake_game(monkeypatch):
@@ -63,6 +66,16 @@ def fake_game(monkeypatch):
     monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": FakeAdapter(hits)})
     monkeypatch.setattr(topdeck.cli, "_is_interactive", lambda: False)
     return hits
+
+
+@pytest.fixture(autouse=True)
+def _no_auto_sync(monkeypatch):
+    """Auto-sync is covered by its own tests in test_backbone.py.
+
+    These tests use a fake game with no sync history, so without this
+    every price lookup here would attempt a real network sync.
+    """
+    monkeypatch.setattr(topdeck.cli, "_maybe_auto_sync", lambda adapter, as_json: None)
 
 
 def test_unknown_game_lists_valid_games(capsys, fake_game):
@@ -246,3 +259,53 @@ def test_cli_module_main_guard(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         runpy.run_module("topdeck.cli", run_name="__main__", alter_sys=True)
     assert exc.value.code == 0
+
+
+def _index_for_fake(tmp_path, monkeypatch):
+    """A synced trigram index for the fake game, under a fake cache dir."""
+    from topdeck import backbone, trigrams
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    conn = backbone._connect()
+    try:
+        trigrams.build_index(conn, "fake", [(1, "Lightning Bolt", "Fake Set", "FS")])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_no_matches_suggests_spelling(capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": FakeAdapter([])})
+    _index_for_fake(tmp_path, monkeypatch)
+    assert main(["price", "fake", "Lighnting Bolt"]) == 0
+    out = capsys.readouterr().out
+    assert "No matches" in out
+    assert 'Did you mean: "Lightning Bolt"?' in out
+
+
+def test_no_matches_without_index_has_no_suggestion(capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": FakeAdapter([])})
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert main(["price", "fake", "Lighnting Bolt"]) == 0
+    assert "Did you mean" not in capsys.readouterr().out
+
+
+def test_watch_add_no_matches_suggests_spelling(capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": FakeAdapter([])})
+    monkeypatch.setattr(topdeck.cli, "_is_interactive", lambda: False)
+    monkeypatch.setenv("TOPDECK_DATA_DIR", str(tmp_path / "data"))
+    _index_for_fake(tmp_path, monkeypatch)
+    assert main(["watch", "add", "fake", "Lighnting Bolt"]) == 0
+    assert 'Did you mean: "Lightning Bolt"?' in capsys.readouterr().out
+
+
+def test_batch_no_matches_suggests_spelling(capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": FakeAdapter([])})
+    monkeypatch.setattr(topdeck.cli, "_is_interactive", lambda: False)
+    monkeypatch.setenv("COLUMNS", "120")  # hermetic table width, no mid-word wraps
+    _index_for_fake(tmp_path, monkeypatch)
+    decklist = tmp_path / "deck.txt"
+    decklist.write_text("1 Lighnting Bolt\n")
+    assert main(["price", "fake", "--file", str(decklist)]) == 0
+    out = capsys.readouterr().out
+    assert 'Did you mean: "Lightning Bolt"?' in out
