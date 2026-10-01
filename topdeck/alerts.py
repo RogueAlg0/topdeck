@@ -10,9 +10,18 @@ both in integer cents, no models and no new dependencies:
   Fires when the current price sits above the upper band or below the
   lower band.
 
-Minimum-history rule: fewer than MIN_BASELINE_POINTS baseline points
-means no smart alerts for that card. Saying nothing beats alerting on
-noise, so thin history stays silent rather than guessing.
+Glitch guard: one bad print must not move the baseline or fake a
+spike. Tukey 1.5*IQR fences (the same rule the price table uses for its
+"!" markers) split the baseline into inliers and suspected glitches;
+the mean and the bands are computed on inliers only. A current price
+outside the fences is treated as a glitch until a second consecutive
+snapshot confirms it: a real move persists at the new level, a bad
+print reverts.
+
+Minimum-history rule: fewer than MIN_BASELINE_POINTS trustworthy
+baseline points means no smart alerts for that card. Saying nothing
+beats alerting on noise, so thin history stays silent rather than
+guessing.
 """
 
 from __future__ import annotations
@@ -71,6 +80,29 @@ def _dollars(cents: float) -> str:
     return f"${cents / 100:,.2f}"
 
 
+def _percentile(ordered: list[float], pct: float) -> float:
+    """Linear-interpolation percentile over an already sorted list."""
+    rank = pct / 100 * (len(ordered) - 1)
+    low = int(rank)
+    frac = rank - low
+    return ordered[low] * (1 - frac) + ordered[low + 1] * frac
+
+
+def _tukey_fences(values: list[int]) -> tuple[float, float]:
+    """The 1.5*IQR fences around the baseline snapshots.
+
+    Anything outside the fences is a suspected glitch print: it is cut
+    from the baseline before any statistic is computed, so one bad
+    number can neither inflate the average nor fake a spike. The
+    current price is judged against the same fences.
+    """
+    ordered = sorted(values)
+    q1 = _percentile(ordered, 25)
+    q3 = _percentile(ordered, 75)
+    iqr = q3 - q1
+    return q1 - 1.5 * iqr, q3 + 1.5 * iqr
+
+
 def _headline(
     history: list[tuple[str, int | None, int | None, str]],
 ) -> list[tuple[str, int]]:
@@ -99,21 +131,39 @@ def evaluate(
     The baseline is the last `window` snapshots before the current one;
     the current price is always the newest snapshot and never part of
     the baseline. With a daily `topdeck check` from cron, the window is
-    a genuine N-day average. Fewer than MIN_BASELINE_POINTS baseline
-    snapshots means no alerts, however the window is set.
+    a genuine N-day average. Fewer than MIN_BASELINE_POINTS trustworthy
+    baseline snapshots means no alerts, however the window is set.
+
+    Glitch guard, in two parts. First, Tukey-outlier snapshots are cut
+    from the baseline before the mean and the bands are computed, so a
+    bad print in history cannot inflate either. Second, a current price
+    outside the fences needs a second consecutive snapshot on the same
+    side, nearer to the new price than to the old average: a real move
+    persists at the new level while a glitch reverts, so a single wild
+    print stays silent.
     """
     points = _headline(history)
     if len(points) < MIN_BASELINE_POINTS + 1:
         return []
-    baseline = points[-(window + 1) : -1]
+    baseline = [cents for _, cents in points[-(window + 1) : -1]]
     if len(baseline) < MIN_BASELINE_POINTS:
         return []
+    low, high = _tukey_fences(baseline)
+    inliers = [cents for cents in baseline if low <= cents <= high]
+    if len(inliers) < MIN_BASELINE_POINTS:
+        return []
     current = points[-1][1]
-    count = len(baseline)
-    mean = sum(cents for _, cents in baseline) / count
+    previous = points[-2][1]
+    count = len(inliers)
+    mean = sum(inliers) / count
+    if current < low or current > high:
+        same_side = (previous < low and current < low) or (previous > high and current > high)
+        persists = abs(current - previous) < abs(current - mean)
+        if not (same_side and persists):
+            return []
 
     deviation = (current - mean) / mean * 100 if mean > 0 else None
-    variance = sum((cents - mean) ** 2 for _, cents in baseline) / count
+    variance = sum((cents - mean) ** 2 for cents in inliers) / count
     stddev = math.sqrt(variance)
     upper = mean + band_k * stddev
     lower = mean - band_k * stddev
