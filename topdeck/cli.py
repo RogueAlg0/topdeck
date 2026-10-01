@@ -346,37 +346,25 @@ def _is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _maybe_auto_sync(adapter, as_json: bool) -> None:
-    """Sync a never-synced game before its first price lookup.
+def _maybe_auto_sync(adapter, as_json: bool):
+    """Start a background sync for a never-synced game; never block the lookup.
 
     Only "never" triggers: a stale sync still serves the live price
     path, so it does not surprise anyone with a bulk download. The
-    sync's own progress runs on stderr, and it is completely silent
-    under --json. A failed sync is a stderr note; the lookup then
-    falls back to the existing live price path.
+    lookup serves live prices immediately while the sync runs on a
+    daemon thread; the next lookup uses the sidecar once the sync
+    lands. Notes run on stderr, silent under --json. Returns the sync
+    thread, or None when no sync started.
     """
-    game = adapter.game_key
-    if backbone.sync_status(game) != "never":
-        return
-    if not as_json:
-        print(
-            f'Price data for "{game}" was never synced. Syncing it now.',
-            file=sys.stderr,
-        )
-    result = backbone.sync_game(game)
-    if as_json:
-        return
-    if result.ok:
-        print(
-            f"Synced {game}: {result.groups} groups, {result.products} products with prices.",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"Could not sync {game} prices ({result.error or 'unknown error'}). "
-            "Using live prices instead.",
-            file=sys.stderr,
-        )
+    thread = backbone.start_background_sync(adapter.game_key, as_json)
+    if thread is None or as_json:
+        return thread
+    print(
+        f'Price data for "{adapter.game_key}" was never synced. '
+        "Syncing it in the background; showing live prices meanwhile.",
+        file=sys.stderr,
+    )
+    return thread
 
 
 def _price_sparkline(adapter, hit: CardHit) -> str | None:

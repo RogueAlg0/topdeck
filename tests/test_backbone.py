@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import topdeck.cli
 import topdeck.net
 from topdeck import backbone
 from topdeck.adapters import REGISTRY, resolve_game
@@ -820,19 +824,46 @@ def _fake_sync_ok(monkeypatch, groups=2, products=5):
 
 
 def test_price_auto_syncs_never_synced_game(cache_home, first_run_game, capsys, monkeypatch):
-    seen = _fake_sync_ok(monkeypatch)
+    seen = []
+    real_start = backbone.start_background_sync
+
+    def spy(game, as_json=False):
+        seen.append(game)
+        thread = real_start(game, as_json)
+        thread.join(timeout=10)
+        return thread
+
+    monkeypatch.setattr(backbone, "start_background_sync", spy)
+    monkeypatch.setattr(
+        backbone,
+        "sync_game",
+        lambda game: SyncResult(game=game, ok=True, groups=2, products=5),
+    )
     assert main(["price", "fake", "solo"]) == 0
     assert seen == ["fake"]
     captured = capsys.readouterr()
-    assert 'Price data for "fake" was never synced. Syncing it now.' in captured.err
-    assert "Synced fake: 2 groups, 5 products with prices." in captured.err
+    assert (
+        'Price data for "fake" was never synced. '
+        "Syncing it in the background; showing live prices meanwhile." in captured.err
+    )
     assert "Solo" in captured.out
 
 
 def test_price_auto_sync_silent_under_json(cache_home, first_run_game, capsys, monkeypatch):
-    seen = _fake_sync_ok(monkeypatch)
+    real_start = backbone.start_background_sync
+
+    def spy(game, as_json=False):
+        thread = real_start(game, as_json)
+        thread.join(timeout=10)
+        return thread
+
+    monkeypatch.setattr(backbone, "start_background_sync", spy)
+    monkeypatch.setattr(
+        backbone,
+        "sync_game",
+        lambda game: SyncResult(game=game, ok=True, groups=2, products=5),
+    )
     assert main(["--json", "price", "fake", "solo"]) == 0
-    assert seen == ["fake"]
     captured = capsys.readouterr()
     assert captured.err == ""
     payload = json.loads(captured.out)
@@ -841,6 +872,16 @@ def test_price_auto_sync_silent_under_json(cache_home, first_run_game, capsys, m
 
 
 def test_price_auto_sync_failure_falls_back(cache_home, first_run_game, capsys, monkeypatch):
+    # The lookup never waits on the sync, so it serves live prices even
+    # when the background sync fails; the worker leaves one stderr note.
+    real_start = backbone.start_background_sync
+
+    def spy(game, as_json=False):
+        thread = real_start(game, as_json)
+        thread.join(timeout=10)
+        return thread
+
+    monkeypatch.setattr(backbone, "start_background_sync", spy)
     monkeypatch.setattr(
         backbone,
         "sync_game",
@@ -848,9 +889,27 @@ def test_price_auto_sync_failure_falls_back(cache_home, first_run_game, capsys, 
     )
     assert main(["price", "fake", "solo"]) == 0
     captured = capsys.readouterr()
-    assert "Could not sync fake prices (boom)." in captured.err
-    assert "Using live prices instead." in captured.err
+    assert 'Background sync of "fake" failed (boom).' in captured.err
+    assert "Run `topdeck sync fake` to retry." in captured.err
     assert "Solo" in captured.out
+
+
+def test_price_auto_sync_failure_silent_under_json(cache_home, first_run_game, capsys, monkeypatch):
+    real_start = backbone.start_background_sync
+
+    def spy(game, as_json=False):
+        thread = real_start(game, as_json)
+        thread.join(timeout=10)
+        return thread
+
+    monkeypatch.setattr(backbone, "start_background_sync", spy)
+    monkeypatch.setattr(
+        backbone,
+        "sync_game",
+        lambda game: SyncResult(game=game, ok=False, error="boom"),
+    )
+    assert main(["--json", "price", "fake", "solo"]) == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_price_no_auto_sync_when_already_synced(cache_home, first_run_game, capsys, monkeypatch):
@@ -977,3 +1036,233 @@ def test_tcgcsv_search_trigram_fallback_needs_no_sync(cache_home, fake_net):
     _riftbound_routes(fake_net)
     adapter = REGISTRY["riftbound"]
     assert adapter.search("Test Card Alpah") == []
+
+
+# --- Background auto-sync: lookups never wait on a bulk sync ---
+
+
+def test_start_background_sync_returns_without_waiting(cache_home, monkeypatch):
+    gate = threading.Event()
+    calls = []
+
+    def slow_sync(game):
+        calls.append(game)
+        assert gate.wait(timeout=10)
+        return SyncResult(game=game, ok=True)
+
+    monkeypatch.setattr(backbone, "sync_game", slow_sync)
+    start = time.monotonic()
+    thread = backbone.start_background_sync("fake")
+    elapsed = time.monotonic() - start
+    assert thread is not None
+    assert thread.daemon
+    assert elapsed < 2  # the 10-second sync did not block the caller
+    assert calls == ["fake"]  # ...but it did start in the background
+    gate.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+
+def test_start_background_sync_skips_synced_game(cache_home, monkeypatch):
+    _stamp_meta("fake", datetime.now(timezone.utc))
+
+    def boom(game):
+        raise AssertionError("sync must not run for a fresh game")
+
+    monkeypatch.setattr(backbone, "sync_game", boom)
+    assert backbone.start_background_sync("fake") is None
+
+
+def test_start_background_sync_lock_blocks_second_owner(cache_home, monkeypatch):
+    assert backbone._acquire_sync_lock("fake")
+
+    def boom(game):
+        raise AssertionError("locked-out sync must not run")
+
+    monkeypatch.setattr(backbone, "sync_game", boom)
+    try:
+        assert backbone.start_background_sync("fake") is None
+    finally:
+        backbone._release_sync_lock("fake")
+    # Once released, a new sync starts normally.
+    calls = []
+    monkeypatch.setattr(
+        backbone, "sync_game", lambda game: calls.append(game) or SyncResult(game=game, ok=True)
+    )
+    thread = backbone.start_background_sync("fake")
+    assert thread is not None
+    thread.join(timeout=10)
+    assert calls == ["fake"]
+    assert not os.path.exists(backbone.sync_lock_path("fake"))
+
+
+def test_background_sync_reclaims_stale_lock(cache_home, monkeypatch):
+    path = backbone.sync_lock_path("fake")
+    os.makedirs(backbone.backbone_dir(), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        # A PID that cannot exist: the previous owner is gone.
+        handle.write("2147483647")
+    calls = []
+    monkeypatch.setattr(
+        backbone, "sync_game", lambda game: calls.append(game) or SyncResult(game=game, ok=True)
+    )
+    thread = backbone.start_background_sync("fake")
+    assert thread is not None
+    thread.join(timeout=10)
+    assert calls == ["fake"]
+    assert not os.path.exists(path)
+
+
+def test_background_sync_releases_lock_when_sync_crashes(cache_home, monkeypatch):
+    def boom(game):
+        raise RuntimeError("sync exploded")
+
+    monkeypatch.setattr(backbone, "sync_game", boom)
+    thread = backbone.start_background_sync("fake")
+    assert thread is not None
+    thread.join(timeout=10)
+    assert not os.path.exists(backbone.sync_lock_path("fake"))
+    # A later lookup can start a fresh sync: the lock did not stick.
+    calls = []
+    monkeypatch.setattr(
+        backbone, "sync_game", lambda game: calls.append(game) or SyncResult(game=game, ok=True)
+    )
+    retry = backbone.start_background_sync("fake")
+    assert retry is not None
+    retry.join(timeout=10)
+    assert calls == ["fake"]
+
+
+def test_background_sync_worker_notes_failure(cache_home, capsys, monkeypatch):
+    monkeypatch.setattr(
+        backbone, "sync_game", lambda game: SyncResult(game=game, ok=False, error="boom")
+    )
+    thread = backbone.start_background_sync("fake")
+    thread.join(timeout=10)
+    captured = capsys.readouterr()
+    assert 'Background sync of "fake" failed (boom).' in captured.err
+
+
+def test_acquire_sync_lock_loses_race(cache_home, monkeypatch):
+    # A stale lock is reclaimed, but another process wins the
+    # create in between: no sync starts.
+    path = backbone.sync_lock_path("fake")
+    os.makedirs(backbone.backbone_dir(), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("2147483647")
+
+    def always_exists(*args, **kwargs):
+        raise FileExistsError("lost the race")
+
+    monkeypatch.setattr(os, "open", always_exists)
+    assert backbone._acquire_sync_lock("fake") is False
+
+
+def test_acquire_sync_lock_remove_failure(cache_home, monkeypatch):
+    path = backbone.sync_lock_path("fake")
+    os.makedirs(backbone.backbone_dir(), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("2147483647")
+
+    def boom(path):
+        raise OSError("cannot remove")
+
+    monkeypatch.setattr(os, "remove", boom)
+    assert backbone._acquire_sync_lock("fake") is False
+
+
+def test_lock_is_stale_unreadable(cache_home):
+    assert backbone._lock_is_stale(os.path.join(backbone.backbone_dir(), "nope.lock"))
+    path = backbone.sync_lock_path("fake")
+    os.makedirs(backbone.backbone_dir(), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("not-a-pid")
+    assert backbone._lock_is_stale(path)
+
+
+def test_release_sync_lock_only_owns_own(cache_home):
+    # A lock owned by another live process is left alone.
+    assert backbone._acquire_sync_lock("fake")
+    path = backbone.sync_lock_path("fake")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid() + 1))
+    backbone._release_sync_lock("fake")
+    assert os.path.exists(path)
+
+
+def test_release_sync_lock_remove_failure(cache_home, monkeypatch):
+    assert backbone._acquire_sync_lock("fake")
+
+    def boom(path):
+        raise OSError("cannot remove")
+
+    monkeypatch.setattr(os, "remove", boom)
+    backbone._release_sync_lock("fake")  # never raises
+    assert os.path.exists(backbone.sync_lock_path("fake"))
+
+
+def test_release_sync_lock_missing_file_is_noop(cache_home):
+    backbone._release_sync_lock("fake")  # no lock file: no-op, no raise
+
+
+def test_failed_sync_keeps_old_rows(cache_home, fake_net, monkeypatch):
+    # Seed a good sync, then fail before _store: the old rows stay live.
+    backbone._store("riftbound", [(101, "Test Card Alpha", "Set", "S", 100, 90)])
+    assert backbone.sync_status("riftbound") == "fresh"
+
+    def boom(category_id):
+        raise RuntimeError("network is down")
+
+    monkeypatch.setattr(backbone, "_fetch_groups", boom)
+    result = backbone.sync_game("riftbound")
+    assert not result.ok
+    row = backbone.lookup_price("riftbound", 101)
+    assert row is not None
+    assert row["market_cents"] == 100
+    assert backbone.sync_status("riftbound") == "fresh"
+
+
+def test_killed_sync_rolls_back(cache_home, monkeypatch):
+    # A sync killed mid-write (the write aborts before commit) keeps
+    # the old rows: _store's DELETE plus INSERTs are one transaction.
+    backbone._store("riftbound", [(101, "Test Card Alpha", "Set", "S", 100, 90)])
+
+    def killed(conn, game, rows):
+        raise RuntimeError("killed mid-transaction")
+
+    monkeypatch.setattr(backbone.trigrams, "build_index", killed)
+    with pytest.raises(RuntimeError, match="killed mid-transaction"):
+        backbone._store("riftbound", [(101, "Test Card Alpha", "Set", "S", 1, 1)])
+    row = backbone.lookup_price("riftbound", 101)
+    assert row is not None
+    assert row["market_cents"] == 100
+
+
+def test_maybe_auto_sync_returns_thread_without_blocking(cache_home, capsys, monkeypatch):
+    gate = threading.Event()
+
+    def slow_sync(game):
+        assert gate.wait(timeout=10)
+        return SyncResult(game=game, ok=True)
+
+    monkeypatch.setattr(backbone, "sync_game", slow_sync)
+    adapter = argparse.Namespace(game_key="fake")
+    start = time.monotonic()
+    thread = topdeck.cli._maybe_auto_sync(adapter, False)
+    elapsed = time.monotonic() - start
+    assert thread is not None
+    assert elapsed < 2
+    captured = capsys.readouterr()
+    assert "Syncing it in the background; showing live prices meanwhile." in captured.err
+    gate.set()
+    thread.join(timeout=10)
+
+
+def test_maybe_auto_sync_quiet_when_locked(cache_home, capsys, monkeypatch):
+    assert backbone._acquire_sync_lock("fake")
+    try:
+        adapter = argparse.Namespace(game_key="fake")
+        assert topdeck.cli._maybe_auto_sync(adapter, False) is None
+    finally:
+        backbone._release_sync_lock("fake")
+    assert capsys.readouterr().err == ""
