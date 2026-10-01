@@ -44,7 +44,7 @@ def _hit(name="Bolt", set_name="Alpha"):
     )
 
 
-def _price(value=1.23, currency="USD", provenance="market"):
+def _price(value=1.23, currency="USD", provenance="market", source="fakesource"):
     return Price(
         market="tcgplayer",
         currency=currency,
@@ -52,7 +52,7 @@ def _price(value=1.23, currency="USD", provenance="market"):
         printing="normal",
         price=value,
         as_of="2026-09-30T00:00:00",
-        source="fakesource",
+        source=source,
         source_url="https://example.com/source",
         provenance=provenance,
     )
@@ -190,16 +190,26 @@ def test_relative_as_of_defaults_to_now():
     assert _relative_as_of("2000-01-01T00:00:00+00:00") == "2000-01-01"
 
 
-def test_price_table_columns_fold_source_into_market():
+def test_price_table_shows_source_as_its_own_column():
     table = price_table(_hit(), [_price(), _price()])
     assert [c.header for c in table.columns] == [
         "Set",
         "Collector #",
         "Finish",
         "Market",
+        "Source",
         "Price",
         "As of",
     ]
+
+
+def test_price_table_source_column_names_each_leg():
+    prices = [_price(source="tcgcsv"), _price(source="scryfall")]
+    console = Console(width=100, record=True)
+    console.print(price_table(_hit(), prices))
+    out = console.export_text()
+    assert "tcgcsv" in out
+    assert "scryfall" in out
 
 
 def test_price_table_caps_long_set_names():

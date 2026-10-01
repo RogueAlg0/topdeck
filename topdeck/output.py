@@ -145,6 +145,46 @@ def outlier_flags(prices: list[Price]) -> dict[int, str]:
     }
 
 
+# Two legs disagree when they claim the same thing (same currency and
+# printing) but their prices spread more than this. The markets may
+# differ: that is the point, two sources quoting two different numbers
+# for the same card in the same money.
+_DISAGREEMENT_SPREAD = 0.25
+
+
+def disagreement_flags(prices: list[Price]) -> dict[int, str]:
+    """Flag rows whose sources disagree, as {row_index: "disagree"}.
+
+    Legs are grouped like-for-like by (currency, printing): no currency
+    conversion, no blending, a foil is never compared to a normal. A
+    group with two or more priced legs whose max/min spread exceeds
+    _DISAGREEMENT_SPREAD gets every row in the group flagged. Groups of
+    one carry no signal, and unpriced or non-positive rows are skipped.
+
+    In practice no game produces a comparable pair today: the sidecar
+    supersedes the live leg it duplicates (see with_sidecar_price), so
+    every (currency, printing) group has exactly one leg. The rule is
+    real and tested; it simply finds nothing until an adapter serves
+    two independent legs for the same currency and printing.
+    """
+    groups: dict[tuple[str, str], list[tuple[int, float]]] = {}
+    for index, price in enumerate(prices):
+        if price.price is None or price.price <= 0:
+            continue
+        key = (price.currency, price.printing)
+        groups.setdefault(key, []).append((index, price.price))
+    flagged: dict[int, str] = {}
+    for legs in groups.values():
+        if len(legs) < 2:
+            continue
+        amounts = [amount for _, amount in legs]
+        spread = (max(amounts) - min(amounts)) / min(amounts)
+        if spread > _DISAGREEMENT_SPREAD:
+            for index, _ in legs:
+                flagged[index] = "disagree"
+    return flagged
+
+
 def is_volatile(released_at: str, now: datetime | None = None) -> bool:
     """True when the set released within VOLATILITY_DAYS.
 
@@ -162,16 +202,21 @@ def is_volatile(released_at: str, now: datetime | None = None) -> bool:
 
 def price_table(hit: CardHit, prices: list[Price], sparkline: str | None = None) -> Table:
     # No title: print_result already shows the card name above the table.
-    # Market doubles as the source link, so Source folds into it.
+    # Source is its own text column: the market (tcgplayer) and the data
+    # provider (tcgcsv, scryfall) are different things and the table names
+    # both. The column is capped so a long source slug can never break
+    # the 80-column layout; real sources are short and never truncate.
     # Trend appears only when there is a real sparkline to show; thin
-    # history keeps the classic six columns.
+    # history keeps the classic seven columns.
     flags = outlier_flags(prices)
+    disagreements = disagreement_flags(prices)
     table = Table(show_header=True, header_style="bold")
     table.add_column("Set", max_width=20, overflow="ellipsis")
     table.add_column("Collector #", no_wrap=True)
     table.add_column("Finish")
     table.add_column("Market")
-    table.add_column("Price", justify="right")
+    table.add_column("Source", max_width=8, overflow="ellipsis")
+    table.add_column("Price", justify="right", no_wrap=True)
     table.add_column("As of", no_wrap=True)
     if sparkline is not None:
         # Capped and ellipsis-truncated, so a long trend never breaks
@@ -182,11 +227,14 @@ def price_table(hit: CardHit, prices: list[Price], sparkline: str | None = None)
         if index in flags:
             # Compact marker; the legend under the table says what it means.
             money.append(" !", style="yellow")
+        if index in disagreements:
+            money.append(" ≠", style="yellow")
         row: list = [
             hit.set_name or hit.set_code,
             hit.collector_number,
             price.printing,
             linked(_market_label(price), price.source_url),
+            price.source,
             money,
             _relative_as_of(price.as_of),
         ]
@@ -272,6 +320,7 @@ def json_payload(
     recommended: bool,
 ) -> str:
     flags = outlier_flags(prices)
+    disagreements = disagreement_flags(prices)
     payload: dict = {
         "game": game,
         "query": query,
@@ -281,7 +330,17 @@ def json_payload(
             "card": _hit_dict(chosen),
             "recommended": recommended,
             "prices": [
-                _price_dict(price, ("outlier",) if index in flags else ())
+                _price_dict(
+                    price,
+                    tuple(
+                        flag
+                        for flag, present in (
+                            ("outlier", index in flags),
+                            ("disagree", index in disagreements),
+                        )
+                        if present
+                    ),
+                )
                 for index, price in enumerate(prices)
             ],
         },
@@ -324,6 +383,11 @@ def print_result(
         console.print(
             "[dim]! marks a price far from the card's other printings: "
             "flagged as suspect, not removed.[/dim]"
+        )
+    if disagreement_flags(prices):
+        console.print(
+            "[dim]≠ marks legs whose sources disagree by more than 25%: "
+            "same currency and printing, different numbers.[/dim]"
         )
     if is_volatile(hit.released_at):
         console.print(
@@ -510,9 +574,12 @@ def batch_table(lines: list) -> Table:
         unit = Text(_money(line.unit))
         unit.append(f" {_market_label(line.unit)}", style="dim")
         flags = outlier_flags(line.prices)
+        disagreements = disagreement_flags(line.prices)
         unit_index = next((i for i, p in enumerate(line.prices) if p is line.unit), None)
         if unit_index is not None and unit_index in flags:
             unit.append(" !", style="yellow")
+        if unit_index is not None and unit_index in disagreements:
+            unit.append(" ≠", style="yellow")
         table.add_row(
             qty,
             card,
@@ -533,12 +600,23 @@ def grand_total_lines(totals: dict[str, float]) -> list[Text]:
 
 
 def _line_dict(line) -> dict:
-    """One batch line as JSON, with outlier flags on its price rows."""
+    """One batch line as JSON, with outlier and disagreement flags on its price rows."""
     flags = outlier_flags(line.prices)
+    disagreements = disagreement_flags(line.prices)
     unit_index = next((i for i, p in enumerate(line.prices) if p is line.unit), None)
 
     def flagged(price, index):
-        return _price_dict(price, ("outlier",) if index in flags else ())
+        return _price_dict(
+            price,
+            tuple(
+                flag
+                for flag, present in (
+                    ("outlier", index in flags),
+                    ("disagree", index in disagreements),
+                )
+                if present
+            ),
+        )
 
     return {
         "query": line.query,
