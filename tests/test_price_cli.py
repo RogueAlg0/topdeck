@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -324,3 +325,78 @@ def test_batch_no_matches_suggests_spelling(capsys, tmp_path, monkeypatch):
     assert main(["price", "fake", "--file", str(decklist)]) == 0
     out = capsys.readouterr().out
     assert 'Did you mean: "Lightning Bolt"?' in out
+
+
+# --- % change inline on lookups ---
+
+
+class _KeyedAdapter(FakeAdapter):
+    def history_key(self, hit):
+        return 42
+
+
+def _seed_history(monkeypatch, tmp_path):
+    """Three snapshots for the fake game: 100 a month ago, 140 five days
+    ago, 150 today."""
+    from topdeck import backbone
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    today = date.today()
+
+    def days_ago(n):
+        return (today - timedelta(days=n)).strftime("%Y-%m-%d")
+
+    backbone.record_history("fake", 42, 100, 90, "tcgcsv", date=days_ago(30))
+    backbone.record_history("fake", 42, 140, 130, "tcgcsv", date=days_ago(5))
+    backbone.record_history("fake", 42, 150, 140, "tcgcsv", date=days_ago(0))
+
+
+def test_price_changes_none_without_join_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert topdeck.cli._price_changes(FakeAdapter([]), _hit("X")) is None
+
+
+def test_price_changes_none_without_history(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert topdeck.cli._price_changes(_KeyedAdapter([]), _hit("X")) is None
+
+
+def test_price_changes_from_history(monkeypatch, tmp_path):
+    _seed_history(monkeypatch, tmp_path)
+    changes = topdeck.cli._price_changes(_KeyedAdapter([]), _hit("X"))
+    assert changes["30d"] == pytest.approx(50.0)
+    assert changes["7d"] == pytest.approx((150 - 140) / 140 * 100)
+
+
+def test_price_table_shows_change_columns(capsys, tmp_path, monkeypatch):
+    _seed_history(monkeypatch, tmp_path)
+    hits = [
+        _hit("Exact Card", "New Set", "10"),
+        _hit("Exact Card", "Old Set", "1"),
+        _hit("Exact Cardamom", "New Set", "5"),
+    ]
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": _KeyedAdapter(hits)})
+    monkeypatch.setattr(topdeck.cli, "_is_interactive", lambda: False)
+    monkeypatch.setenv("COLUMNS", "120")  # hermetic table width, no mid-word wraps
+    assert main(["price", "fake", "Exact Card"]) == 0
+    out = capsys.readouterr().out
+    assert "7d %" in out
+    assert "30d %" in out
+    assert "+7.1%" in out
+    assert "+50.0%" in out
+
+
+def test_price_json_includes_changes(capsys, tmp_path, monkeypatch):
+    _seed_history(monkeypatch, tmp_path)
+    monkeypatch.setattr(topdeck.adapters, "REGISTRY", {"fake": _KeyedAdapter([_hit("Solo")])})
+    assert main(["--json", "price", "fake", "Solo"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["change_30d_pct"] == 50.0
+    assert payload["result"]["change_7d_pct"] == pytest.approx(7.14)
+
+
+def test_price_json_omits_changes_without_history(capsys, fake_game):
+    assert main(["--json", "price", "fake", "Exact Card"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "change_7d_pct" not in payload["result"]
+    assert "change_30d_pct" not in payload["result"]

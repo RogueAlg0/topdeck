@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from types import SimpleNamespace
 
+import pytest
 from rich.console import Console
 
 from topdeck.adapters.base import CardHit, Price
@@ -18,6 +20,7 @@ from topdeck.output import (
     batch_json,
     batch_table,
     candidate_table,
+    change_pct,
     check_table,
     grand_total_lines,
     json_payload,
@@ -411,3 +414,139 @@ def test_batch_json_shape():
     assert second["line_currency"] is None
     assert payload["grand_total"] == {"USD": 10.0}
     assert payload["warnings"] == ["line 2: skipped"]
+
+
+# --- % change inline on lookups ---
+
+
+def _history_rows():
+    # (date, market_cents, mid_cents, source), oldest first.
+    return [
+        ("2026-09-01", 100, 90, "tcgcsv"),
+        ("2026-09-20", 120, 110, "tcgcsv"),
+        ("2026-09-25", 140, 130, "tcgcsv"),
+        ("2026-09-30", 150, 140, "tcgcsv"),
+    ]
+
+
+def test_change_pct_full_window():
+    assert change_pct(_history_rows(), 30, today=date(2026, 9, 30)) == pytest.approx(50.0)
+
+
+def test_change_pct_short_window_uses_window_oldest():
+    # The 7-day window opens at 140, not at the 30-day oldest of 100.
+    assert change_pct(_history_rows(), 7, today=date(2026, 9, 30)) == pytest.approx(
+        (150 - 140) / 140 * 100
+    )
+
+
+def test_change_pct_thin_history_is_none():
+    rows = _history_rows()
+    assert change_pct(rows, 1, today=date(2026, 9, 30)) is None
+    assert change_pct([], 30, today=date(2026, 9, 30)) is None
+    assert change_pct(rows[:1], 30, today=date(2026, 9, 30)) is None
+
+
+def test_change_pct_skips_unpriced_bad_and_future_rows():
+    rows = [
+        ("2026-09-25", None, None, "tcgcsv"),  # no price at all
+        ("not-a-date", 100, 100, "tcgcsv"),  # unparseable
+        ("2026-10-05", 999, 999, "tcgcsv"),  # in the future
+        ("2026-09-28", 100, 90, "tcgcsv"),
+        ("2026-09-30", 110, 100, "tcgcsv"),
+    ]
+    assert change_pct(rows, 30, today=date(2026, 9, 30)) == pytest.approx(10.0)
+
+
+def test_change_pct_zero_oldest_is_none():
+    rows = [("2026-09-25", 0, 0, "tcgcsv"), ("2026-09-30", 150, 140, "tcgcsv")]
+    assert change_pct(rows, 30, today=date(2026, 9, 30)) is None
+
+
+def test_change_pct_falls_back_to_mid():
+    rows = [("2026-09-25", None, 100, "tcgcsv"), ("2026-09-30", None, 150, "tcgcsv")]
+    assert change_pct(rows, 30, today=date(2026, 9, 30)) == pytest.approx(50.0)
+
+
+def test_price_table_shows_change_columns_with_history():
+    console = _console()
+    console.print(
+        price_table(_hit(), [_price(), _price(value=2.0)], changes={"7d": 7.14, "30d": 50.0})
+    )
+    out = console.export_text()
+    assert "7d %" in out
+    assert "30d %" in out
+    assert "+7.1%" in out
+    assert "+50.0%" in out
+
+
+def test_price_table_changes_belong_to_headline_row_only():
+    console = _console()
+    console.print(
+        price_table(_hit(), [_price(), _price(value=2.0)], changes={"7d": -12.35, "30d": 0.0})
+    )
+    out = console.export_text()
+    assert out.count("-12.3%") == 1
+    assert "+0.0%" in out
+
+
+def test_price_table_thin_window_reads_na():
+    console = _console()
+    console.print(price_table(_hit(), [_price()], changes={"7d": None, "30d": 50.0}))
+    out = console.export_text()
+    assert "n/a" in out
+    assert "+50.0%" in out
+
+
+def test_price_table_without_history_has_no_change_columns():
+    console = _console()
+    console.print(price_table(_hit(), [_price()]))
+    out = console.export_text()
+    assert "7d %" not in out
+    assert "30d %" not in out
+
+
+def test_print_result_passes_changes_to_table():
+    console = _console()
+    print_result(
+        console,
+        adapter_name="Fake",
+        trust_tier="solid",
+        hit=_hit(),
+        prices=[_price()],
+        changes={"7d": 5.0, "30d": None},
+    )
+    out = console.export_text()
+    assert "7d %" in out
+    assert "+5.0%" in out
+
+
+def test_json_payload_includes_changes_when_given():
+    payload = json.loads(
+        json_payload(
+            game="fake",
+            query="Bolt",
+            chosen=_hit(),
+            prices=[_price()],
+            alternatives=[],
+            recommended=True,
+            changes={"7d": 7.142, "30d": None},
+        )
+    )
+    assert payload["result"]["change_7d_pct"] == 7.14
+    assert payload["result"]["change_30d_pct"] is None
+
+
+def test_json_payload_omits_changes_without_history():
+    payload = json.loads(
+        json_payload(
+            game="fake",
+            query="Bolt",
+            chosen=_hit(),
+            prices=[_price()],
+            alternatives=[],
+            recommended=True,
+        )
+    )
+    assert "change_7d_pct" not in payload["result"]
+    assert "change_30d_pct" not in payload["result"]

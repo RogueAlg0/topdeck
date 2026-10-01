@@ -8,7 +8,7 @@ hyperlink support; we never emit escape codes ourselves.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from rich.console import Console
 from rich.table import Table
@@ -200,14 +200,21 @@ def is_volatile(released_at: str, now: datetime | None = None) -> bool:
     return 0 <= age_days <= VOLATILITY_DAYS
 
 
-def price_table(hit: CardHit, prices: list[Price], sparkline: str | None = None) -> Table:
+def price_table(
+    hit: CardHit,
+    prices: list[Price],
+    sparkline: str | None = None,
+    changes: dict | None = None,
+) -> Table:
     # No title: print_result already shows the card name above the table.
     # Source is its own text column: the market (tcgplayer) and the data
     # provider (tcgcsv, scryfall) are different things and the table names
     # both. The column is capped so a long source slug can never break
     # the 80-column layout; real sources are short and never truncate.
     # Trend appears only when there is a real sparkline to show; thin
-    # history keeps the classic seven columns.
+    # history keeps the classic seven columns. The 7d/30d change columns
+    # appear whenever history exists at all; a window too thin to price
+    # reads as a dim n/a, never a fabricated number.
     flags = outlier_flags(prices)
     disagreements = disagreement_flags(prices)
     table = Table(show_header=True, header_style="bold")
@@ -222,6 +229,9 @@ def price_table(hit: CardHit, prices: list[Price], sparkline: str | None = None)
         # Capped and ellipsis-truncated, so a long trend never breaks
         # the 80-column layout, even on narrow terminals.
         table.add_column("Trend", no_wrap=True, overflow="ellipsis", max_width=TREND_COLUMN_CHARS)
+    if changes is not None:
+        table.add_column("7d %", justify="right", no_wrap=True, max_width=7)
+        table.add_column("30d %", justify="right", no_wrap=True, max_width=7)
     for index, price in enumerate(prices):
         money = Text(_money(price))
         if index in flags:
@@ -242,6 +252,10 @@ def price_table(hit: CardHit, prices: list[Price], sparkline: str | None = None)
             # The sparkline belongs to the headline row only; the other
             # legs have no history behind them.
             row.append(sparkline if index == 0 else "")
+        if changes is not None:
+            # Same: the % changes describe the card's headline price.
+            row.append(_pct_text(changes.get("7d")) if index == 0 else "")
+            row.append(_pct_text(changes.get("30d")) if index == 0 else "")
         table.add_row(*row)
     return table
 
@@ -318,32 +332,40 @@ def json_payload(
     prices: list[Price],
     alternatives: list[CardHit],
     recommended: bool,
+    changes: dict | None = None,
 ) -> str:
     flags = outlier_flags(prices)
     disagreements = disagreement_flags(prices)
+    result: dict = {
+        "card": _hit_dict(chosen),
+        "recommended": recommended,
+        "prices": [
+            _price_dict(
+                price,
+                tuple(
+                    flag
+                    for flag, present in (
+                        ("outlier", index in flags),
+                        ("disagree", index in disagreements),
+                    )
+                    if present
+                ),
+            )
+            for index, price in enumerate(prices)
+        ],
+    }
+    if changes is not None:
+        # Rounded for readability; None when the window was too thin.
+        result["change_7d_pct"] = round(changes["7d"], 2) if changes.get("7d") is not None else None
+        result["change_30d_pct"] = (
+            round(changes["30d"], 2) if changes.get("30d") is not None else None
+        )
     payload: dict = {
         "game": game,
         "query": query,
         "matches": 1 + len(alternatives),
         "volatile": is_volatile(chosen.released_at),
-        "result": {
-            "card": _hit_dict(chosen),
-            "recommended": recommended,
-            "prices": [
-                _price_dict(
-                    price,
-                    tuple(
-                        flag
-                        for flag, present in (
-                            ("outlier", index in flags),
-                            ("disagree", index in disagreements),
-                        )
-                        if present
-                    ),
-                )
-                for index, price in enumerate(prices)
-            ],
-        },
+        "result": result,
         "alternatives": [{"card": _hit_dict(h), "recommended": False} for h in alternatives],
     }
     if alternatives:
@@ -362,6 +384,7 @@ def print_result(
     hit: CardHit,
     prices: list[Price],
     sparkline: str | None = None,
+    changes: dict | None = None,
 ) -> None:
     console.print()
     console.print(card_line(hit))
@@ -378,7 +401,7 @@ def print_result(
             "The source may not track it yet.[/dim]"
         )
         return
-    console.print(price_table(hit, prices, sparkline=sparkline))
+    console.print(price_table(hit, prices, sparkline=sparkline, changes=changes))
     if outlier_flags(prices):
         console.print(
             "[dim]! marks a price far from the card's other printings: "
@@ -480,6 +503,50 @@ def history_stats(points: list[dict]) -> dict:
         "change_pct": change,
         "sparkline": render_sparkline(priced),
     }
+
+
+def change_pct(rows: list[tuple], days: int, *, today: date | None = None) -> float | None:
+    """% change between the oldest and newest priced snapshots in a trailing window.
+
+    Rows are (date, market_cents, mid_cents, source), oldest first, with
+    date as YYYY-MM-DD. Returns None when fewer than two priced points
+    fall in the window, when the oldest is zero, or when a date does not
+    parse: never a fabricated number. `today` is injectable so tests
+    never depend on the wall clock.
+    """
+    current = today or datetime.now(timezone.utc).date()
+    cutoff = current - timedelta(days=days)
+    priced: list[int] = []
+    for row in rows:
+        try:
+            day = datetime.strptime(row[0], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            continue
+        if day < cutoff or day > current:
+            continue
+        cents = row[1] if row[1] is not None else row[2]
+        if cents is not None:
+            priced.append(cents)
+    if len(priced) < 2:
+        return None
+    first, last = priced[0], priced[-1]
+    if not first:
+        return None
+    return (last - first) / first * 100
+
+
+def _pct_text(pct: float | None) -> Text:
+    """One % change cell: green up, red down, dim n/a when history is thin."""
+    if pct is None:
+        return Text("n/a", style="dim")
+    text = Text(f"{pct:+.1f}%")
+    if pct > 0:
+        text.stylize("green")
+    elif pct < 0:
+        text.stylize("red")
+    else:
+        text.stylize("dim")
+    return text
 
 
 def history_table(points: list[dict]) -> Table:

@@ -389,6 +389,27 @@ def _price_sparkline(adapter, hit: CardHit) -> str | None:
     return sparkline
 
 
+def _price_changes(adapter, hit: CardHit) -> dict | None:
+    """7-day and 30-day % changes for the headline price row.
+
+    Drawn from the same HISTORY_WINDOW_DAYS of recorded history as the
+    sparkline, which get_prices has just extended with today's snapshot.
+    None when the card has no join key or no history on file, in which
+    case the table keeps its classic columns; a window too thin to price
+    reads as None per window, never as a fabricated number.
+    """
+    join_key = adapter.history_key(hit)
+    if join_key is None:
+        return None
+    rows = backbone.get_history(adapter.game_key, join_key, days=output.HISTORY_WINDOW_DAYS)
+    if not rows:
+        return None
+    return {
+        "7d": output.change_pct(rows, 7),
+        "30d": output.change_pct(rows, 30),
+    }
+
+
 def _did_you_mean(adapter, query: str) -> str:
     """A "Did you mean ...?" line from the synced name index, or "".
 
@@ -468,6 +489,7 @@ def cmd_price(args: argparse.Namespace, console: Console) -> int:
                 prices=prices,
                 alternatives=alternatives,
                 recommended=recommended,
+                changes=_price_changes(adapter, chosen) if prices else None,
             )
         )
         return 0
@@ -479,6 +501,7 @@ def cmd_price(args: argparse.Namespace, console: Console) -> int:
         hit=chosen,
         prices=prices,
         sparkline=_price_sparkline(adapter, chosen) if prices else None,
+        changes=_price_changes(adapter, chosen) if prices else None,
     )
     if alternatives:
         ranked_numbers = [i + 1 for i, h in enumerate(ranked) if h is not chosen]
