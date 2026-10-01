@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -621,3 +623,120 @@ def sync_game(game: str) -> SyncResult:
     except Exception as exc:  # one game's failure stays one game's failure
         return SyncResult(game=game, ok=False, error=str(exc))
     return SyncResult(game=game, ok=True, groups=len(groups), products=len(rows))
+
+
+def sync_lock_path(game: str) -> str:
+    """Path of the per-game background-sync lock file."""
+    return os.path.join(backbone_dir(), f"sync-{game}.lock")
+
+
+def _lock_is_stale(path: str) -> bool:
+    """True when the lock file's owner is gone, or the file is unreadable.
+
+    The lock file holds the syncing process's PID. A dead owner means a
+    crashed or killed sync, so the lock is reclaimable. When the
+    platform cannot answer the liveness question, the lock is treated
+    as stale rather than blocking auto-sync forever: at worst two
+    processes sync the same game, and _store's single transaction keeps
+    that safe.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            pid = int(handle.read().strip())
+    except (OSError, ValueError):
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    return False
+
+
+def _acquire_sync_lock(game: str) -> bool:
+    """Take the per-game background-sync lock. False when it is held.
+
+    The create is atomic (O_EXCL), so two processes racing here have
+    exactly one winner. A stale lock is reclaimed first.
+    """
+    os.makedirs(backbone_dir(), exist_ok=True)
+    path = sync_lock_path(game)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        if not _lock_is_stale(path):
+            return False
+        try:
+            os.remove(path)
+        except OSError:
+            return False
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            return False  # lost the race; the other process owns the sync
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+    return True
+
+
+def _release_sync_lock(game: str) -> None:
+    """Drop the per-game lock, but only when this process owns it."""
+    path = sync_lock_path(game)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            owner = handle.read().strip()
+    except OSError:
+        return
+    if owner == str(os.getpid()):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _background_sync_worker(game: str, as_json: bool) -> None:
+    """Run one game's sync off the lookup path, then drop the lock.
+
+    A failed background sync is one stderr note (silent under --json),
+    never an exception: the lookup it detached from is long gone.
+    sync_game promises never to raise, but a daemon thread must not die
+    noisily if that promise ever breaks, so the belt-and-braces except
+    turns a crash into the same failure note.
+    """
+    try:
+        result = sync_game(game)
+    except Exception as exc:
+        result = SyncResult(game=game, ok=False, error=str(exc))
+    finally:
+        _release_sync_lock(game)
+    if not result.ok and not as_json:
+        print(
+            f'Background sync of "{game}" failed '
+            f"({result.error or 'unknown error'}). "
+            f"Run `topdeck sync {game}` to retry.",
+            file=sys.stderr,
+        )
+
+
+def start_background_sync(game: str, as_json: bool = False) -> threading.Thread | None:
+    """Sync a never-synced game without blocking the caller.
+
+    Returns the daemon thread, or None when the game needs no sync or
+    another process already owns one. The worker releases the lock when
+    it finishes, and a stale lock (owner gone) is reclaimed. Daemon
+    means Ctrl-C or a finished lookup never waits on the sync; an
+    interrupted sync leaves the old rows in place because _store
+    commits the new rows and the sync stamp in one transaction, so the
+    next lookup simply tries again.
+    """
+    if sync_status(game) != "never":
+        return None
+    if not _acquire_sync_lock(game):
+        return None
+    thread = threading.Thread(
+        target=_background_sync_worker,
+        args=(game, as_json),
+        name=f"topdeck-sync-{game}",
+        daemon=True,
+    )
+    thread.start()
+    return thread

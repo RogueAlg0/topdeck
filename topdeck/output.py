@@ -8,7 +8,7 @@ hyperlink support; we never emit escape codes ourselves.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from rich.console import Console
 from rich.table import Table
@@ -145,6 +145,46 @@ def outlier_flags(prices: list[Price]) -> dict[int, str]:
     }
 
 
+# Two legs disagree when they claim the same thing (same currency and
+# printing) but their prices spread more than this. The markets may
+# differ: that is the point, two sources quoting two different numbers
+# for the same card in the same money.
+_DISAGREEMENT_SPREAD = 0.25
+
+
+def disagreement_flags(prices: list[Price]) -> dict[int, str]:
+    """Flag rows whose sources disagree, as {row_index: "disagree"}.
+
+    Legs are grouped like-for-like by (currency, printing): no currency
+    conversion, no blending, a foil is never compared to a normal. A
+    group with two or more priced legs whose max/min spread exceeds
+    _DISAGREEMENT_SPREAD gets every row in the group flagged. Groups of
+    one carry no signal, and unpriced or non-positive rows are skipped.
+
+    In practice no game produces a comparable pair today: the sidecar
+    supersedes the live leg it duplicates (see with_sidecar_price), so
+    every (currency, printing) group has exactly one leg. The rule is
+    real and tested; it simply finds nothing until an adapter serves
+    two independent legs for the same currency and printing.
+    """
+    groups: dict[tuple[str, str], list[tuple[int, float]]] = {}
+    for index, price in enumerate(prices):
+        if price.price is None or price.price <= 0:
+            continue
+        key = (price.currency, price.printing)
+        groups.setdefault(key, []).append((index, price.price))
+    flagged: dict[int, str] = {}
+    for legs in groups.values():
+        if len(legs) < 2:
+            continue
+        amounts = [amount for _, amount in legs]
+        spread = (max(amounts) - min(amounts)) / min(amounts)
+        if spread > _DISAGREEMENT_SPREAD:
+            for index, _ in legs:
+                flagged[index] = "disagree"
+    return flagged
+
+
 def is_volatile(released_at: str, now: datetime | None = None) -> bool:
     """True when the set released within VOLATILITY_DAYS.
 
@@ -160,33 +200,51 @@ def is_volatile(released_at: str, now: datetime | None = None) -> bool:
     return 0 <= age_days <= VOLATILITY_DAYS
 
 
-def price_table(hit: CardHit, prices: list[Price], sparkline: str | None = None) -> Table:
+def price_table(
+    hit: CardHit,
+    prices: list[Price],
+    sparkline: str | None = None,
+    changes: dict | None = None,
+) -> Table:
     # No title: print_result already shows the card name above the table.
-    # Market doubles as the source link, so Source folds into it.
+    # Source is its own text column: the market (tcgplayer) and the data
+    # provider (tcgcsv, scryfall) are different things and the table names
+    # both. The column is capped so a long source slug can never break
+    # the 80-column layout; real sources are short and never truncate.
     # Trend appears only when there is a real sparkline to show; thin
-    # history keeps the classic six columns.
+    # history keeps the classic seven columns. The 7d/30d change columns
+    # appear whenever history exists at all; a window too thin to price
+    # reads as a dim n/a, never a fabricated number.
     flags = outlier_flags(prices)
+    disagreements = disagreement_flags(prices)
     table = Table(show_header=True, header_style="bold")
     table.add_column("Set", max_width=20, overflow="ellipsis")
     table.add_column("Collector #", no_wrap=True)
     table.add_column("Finish")
     table.add_column("Market")
-    table.add_column("Price", justify="right")
+    table.add_column("Source", max_width=8, overflow="ellipsis")
+    table.add_column("Price", justify="right", no_wrap=True)
     table.add_column("As of", no_wrap=True)
     if sparkline is not None:
         # Capped and ellipsis-truncated, so a long trend never breaks
         # the 80-column layout, even on narrow terminals.
         table.add_column("Trend", no_wrap=True, overflow="ellipsis", max_width=TREND_COLUMN_CHARS)
+    if changes is not None:
+        table.add_column("7d %", justify="right", no_wrap=True, max_width=7)
+        table.add_column("30d %", justify="right", no_wrap=True, max_width=7)
     for index, price in enumerate(prices):
         money = Text(_money(price))
         if index in flags:
             # Compact marker; the legend under the table says what it means.
             money.append(" !", style="yellow")
+        if index in disagreements:
+            money.append(" ≠", style="yellow")
         row: list = [
             hit.set_name or hit.set_code,
             hit.collector_number,
             price.printing,
             linked(_market_label(price), price.source_url),
+            price.source,
             money,
             _relative_as_of(price.as_of),
         ]
@@ -194,6 +252,10 @@ def price_table(hit: CardHit, prices: list[Price], sparkline: str | None = None)
             # The sparkline belongs to the headline row only; the other
             # legs have no history behind them.
             row.append(sparkline if index == 0 else "")
+        if changes is not None:
+            # Same: the % changes describe the card's headline price.
+            row.append(_pct_text(changes.get("7d")) if index == 0 else "")
+            row.append(_pct_text(changes.get("30d")) if index == 0 else "")
         table.add_row(*row)
     return table
 
@@ -270,21 +332,40 @@ def json_payload(
     prices: list[Price],
     alternatives: list[CardHit],
     recommended: bool,
+    changes: dict | None = None,
 ) -> str:
     flags = outlier_flags(prices)
+    disagreements = disagreement_flags(prices)
+    result: dict = {
+        "card": _hit_dict(chosen),
+        "recommended": recommended,
+        "prices": [
+            _price_dict(
+                price,
+                tuple(
+                    flag
+                    for flag, present in (
+                        ("outlier", index in flags),
+                        ("disagree", index in disagreements),
+                    )
+                    if present
+                ),
+            )
+            for index, price in enumerate(prices)
+        ],
+    }
+    if changes is not None:
+        # Rounded for readability; None when the window was too thin.
+        result["change_7d_pct"] = round(changes["7d"], 2) if changes.get("7d") is not None else None
+        result["change_30d_pct"] = (
+            round(changes["30d"], 2) if changes.get("30d") is not None else None
+        )
     payload: dict = {
         "game": game,
         "query": query,
         "matches": 1 + len(alternatives),
         "volatile": is_volatile(chosen.released_at),
-        "result": {
-            "card": _hit_dict(chosen),
-            "recommended": recommended,
-            "prices": [
-                _price_dict(price, ("outlier",) if index in flags else ())
-                for index, price in enumerate(prices)
-            ],
-        },
+        "result": result,
         "alternatives": [{"card": _hit_dict(h), "recommended": False} for h in alternatives],
     }
     if alternatives:
@@ -292,6 +373,36 @@ def json_payload(
             f"{len(alternatives) + 1} cards matched. Showing the recommended "
             "one; re-run with --pick N to choose another."
         )
+    return json.dumps(payload, indent=2)
+
+
+def trade_json(
+    *,
+    game: str,
+    sides: list[tuple[str, list[tuple[CardHit, float | None]]]],
+    totals: list[float],
+    verdict: str,
+    warnings: list[str],
+) -> str:
+    """Machine-readable trade evaluation: per-card values, totals, difference, verdict.
+
+    sides is [(label, [(hit, value), ...]), ...] with value None for
+    unpriced cards. difference_pct is None when neither side has a
+    priced card.
+    """
+    larger = max(totals) if totals else 0
+    diff = abs(totals[0] - totals[1]) if len(totals) == 2 else 0
+    payload: dict = {
+        "game": game,
+        "side_a": [{"card": _hit_dict(hit), "value": value} for hit, value in sides[0][1]],
+        "side_b": [{"card": _hit_dict(hit), "value": value} for hit, value in sides[1][1]],
+        "total_a": round(totals[0], 2),
+        "total_b": round(totals[1], 2),
+        "difference": round(diff, 2),
+        "difference_pct": round(diff / larger * 100, 1) if larger else None,
+        "verdict": verdict,
+        "warnings": warnings,
+    }
     return json.dumps(payload, indent=2)
 
 
@@ -303,6 +414,7 @@ def print_result(
     hit: CardHit,
     prices: list[Price],
     sparkline: str | None = None,
+    changes: dict | None = None,
 ) -> None:
     console.print()
     console.print(card_line(hit))
@@ -319,11 +431,16 @@ def print_result(
             "The source may not track it yet.[/dim]"
         )
         return
-    console.print(price_table(hit, prices, sparkline=sparkline))
+    console.print(price_table(hit, prices, sparkline=sparkline, changes=changes))
     if outlier_flags(prices):
         console.print(
             "[dim]! marks a price far from the card's other printings: "
             "flagged as suspect, not removed.[/dim]"
+        )
+    if disagreement_flags(prices):
+        console.print(
+            "[dim]≠ marks legs whose sources disagree by more than 25%: "
+            "same currency and printing, different numbers.[/dim]"
         )
     if is_volatile(hit.released_at):
         console.print(
@@ -418,6 +535,50 @@ def history_stats(points: list[dict]) -> dict:
     }
 
 
+def change_pct(rows: list[tuple], days: int, *, today: date | None = None) -> float | None:
+    """% change between the oldest and newest priced snapshots in a trailing window.
+
+    Rows are (date, market_cents, mid_cents, source), oldest first, with
+    date as YYYY-MM-DD. Returns None when fewer than two priced points
+    fall in the window, when the oldest is zero, or when a date does not
+    parse: never a fabricated number. `today` is injectable so tests
+    never depend on the wall clock.
+    """
+    current = today or datetime.now(timezone.utc).date()
+    cutoff = current - timedelta(days=days)
+    priced: list[int] = []
+    for row in rows:
+        try:
+            day = datetime.strptime(row[0], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            continue
+        if day < cutoff or day > current:
+            continue
+        cents = row[1] if row[1] is not None else row[2]
+        if cents is not None:
+            priced.append(cents)
+    if len(priced) < 2:
+        return None
+    first, last = priced[0], priced[-1]
+    if not first:
+        return None
+    return (last - first) / first * 100
+
+
+def _pct_text(pct: float | None) -> Text:
+    """One % change cell: green up, red down, dim n/a when history is thin."""
+    if pct is None:
+        return Text("n/a", style="dim")
+    text = Text(f"{pct:+.1f}%")
+    if pct > 0:
+        text.stylize("green")
+    elif pct < 0:
+        text.stylize("red")
+    else:
+        text.stylize("dim")
+    return text
+
+
 def history_table(points: list[dict]) -> Table:
     """The price series, oldest first: one row per snapshot."""
     table = Table(show_header=True, header_style="bold")
@@ -510,9 +671,12 @@ def batch_table(lines: list) -> Table:
         unit = Text(_money(line.unit))
         unit.append(f" {_market_label(line.unit)}", style="dim")
         flags = outlier_flags(line.prices)
+        disagreements = disagreement_flags(line.prices)
         unit_index = next((i for i, p in enumerate(line.prices) if p is line.unit), None)
         if unit_index is not None and unit_index in flags:
             unit.append(" !", style="yellow")
+        if unit_index is not None and unit_index in disagreements:
+            unit.append(" ≠", style="yellow")
         table.add_row(
             qty,
             card,
@@ -533,12 +697,23 @@ def grand_total_lines(totals: dict[str, float]) -> list[Text]:
 
 
 def _line_dict(line) -> dict:
-    """One batch line as JSON, with outlier flags on its price rows."""
+    """One batch line as JSON, with outlier and disagreement flags on its price rows."""
     flags = outlier_flags(line.prices)
+    disagreements = disagreement_flags(line.prices)
     unit_index = next((i for i, p in enumerate(line.prices) if p is line.unit), None)
 
     def flagged(price, index):
-        return _price_dict(price, ("outlier",) if index in flags else ())
+        return _price_dict(
+            price,
+            tuple(
+                flag
+                for flag, present in (
+                    ("outlier", index in flags),
+                    ("disagree", index in disagreements),
+                )
+                if present
+            ),
+        )
 
     return {
         "query": line.query,

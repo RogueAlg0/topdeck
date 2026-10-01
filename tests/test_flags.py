@@ -13,6 +13,7 @@ from topdeck.output import (
     _median,
     batch_json,
     batch_table,
+    disagreement_flags,
     is_volatile,
     json_payload,
     outlier_flags,
@@ -21,10 +22,10 @@ from topdeck.output import (
 )
 
 
-def _price(value, printing="normal"):
+def _price(value, printing="normal", currency="USD"):
     return Price(
         market="tcgplayer",
-        currency="USD",
+        currency=currency,
         condition="near-mint",
         printing=printing,
         price=value,
@@ -255,7 +256,11 @@ def test_json_payload_carries_flags_and_volatility():
     )
     assert payload["volatile"] is True
     assert payload["result"]["card"]["released_at"] == released
-    assert [p["flags"] for p in payload["result"]["prices"]] == [[], [], ["outlier"]]
+    assert [p["flags"] for p in payload["result"]["prices"]] == [
+        ["disagree"],
+        ["disagree"],
+        ["outlier", "disagree"],
+    ]
 
 
 def test_json_payload_clean_card():
@@ -278,8 +283,12 @@ def test_batch_json_carries_outlier_flags():
     line = _batch_line(prices, prices[2])
     payload = json.loads(batch_json(game="fake", lines=[line], grand_total={}, warnings=[]))
     entry = payload["lines"][0]
-    assert entry["unit_price"]["flags"] == ["outlier"]
-    assert [p["flags"] for p in entry["prices"]] == [[], [], ["outlier"]]
+    assert entry["unit_price"]["flags"] == ["outlier", "disagree"]
+    assert [p["flags"] for p in entry["prices"]] == [
+        ["disagree"],
+        ["disagree"],
+        ["outlier", "disagree"],
+    ]
 
 
 def test_batch_json_error_line_has_no_flags():
@@ -297,3 +306,73 @@ def test_batch_json_error_line_has_no_flags():
     entry = payload["lines"][0]
     assert entry["unit_price"] is None
     assert entry["prices"] == []
+
+
+# ---------------------------------------------------------------------------
+# Disagreement flags: two sources, same currency and printing, far apart
+
+
+def test_disagreement_flags_comparable_usd_legs():
+    prices = [_price(4.00), _price(5.50)]
+    assert disagreement_flags(prices) == {0: "disagree", 1: "disagree"}
+
+
+def test_disagreement_ignores_small_spreads():
+    prices = [_price(4.00), _price(4.50)]
+    assert disagreement_flags(prices) == {}
+
+
+def test_disagreement_spread_is_strict():
+    # Exactly 25%: the flag fires above the threshold, not at it.
+    prices = [_price(4.00), _price(5.00)]
+    assert disagreement_flags(prices) == {}
+
+
+def test_disagreement_never_converts_currency():
+    prices = [_price(4.00), _price(5.50, currency="EUR")]
+    assert disagreement_flags(prices) == {}
+
+
+def test_disagreement_never_blends_printings():
+    prices = [_price(4.00), _price(5.50, printing="foil")]
+    assert disagreement_flags(prices) == {}
+
+
+def test_disagreement_needs_two_priced_legs():
+    assert disagreement_flags([_price(4.00)]) == {}
+    assert disagreement_flags([_price(None), _price(0.0), _price(4.00)]) == {}
+
+
+def test_price_table_marks_disagreeing_legs():
+    console = _console()
+    console.print(price_table(_hit(), [_price(4.00), _price(5.50)]))
+    assert "≠" in console.export_text()
+
+
+def test_print_result_explains_disagreement_marker():
+    console = _console()
+    print_result(
+        console,
+        adapter_name="Fake Game",
+        trust_tier="solid",
+        hit=_hit(),
+        prices=[_price(4.00), _price(5.50)],
+    )
+    assert "≠ marks legs whose sources disagree" in console.export_text()
+
+
+def test_json_payload_carries_disagree_flags():
+    payload = json.loads(
+        json_payload(
+            game="fake",
+            query="Bolt",
+            chosen=_hit(),
+            prices=[_price(4.00), _price(5.50)],
+            alternatives=[],
+            recommended=True,
+        )
+    )
+    assert [p["flags"] for p in payload["result"]["prices"]] == [
+        ["disagree"],
+        ["disagree"],
+    ]

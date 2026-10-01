@@ -71,19 +71,27 @@ def _hit(**extra) -> CardHit:
 
 
 def test_avg_deviation_fires_and_states_the_rule():
-    history = _rows([420] * 14) + [("2026-09-15", 510, None, "scryfall")]
+    # The $5.10 level is confirmed by a second consecutive snapshot;
+    # a single wild print would stay silent as a suspected glitch.
+    history = _rows([420] * 13) + [
+        ("2026-09-14", 510, None, "scryfall"),
+        ("2026-09-15", 510, None, "scryfall"),
+    ]
     fired = alerts.evaluate(history)
     assert [a.rule for a in fired] == ["avg_deviation", "band_high"]
     first = fired[0]
     assert first.line == "14d avg $4.20, now $5.10 (+21.4%)"
     assert first.window == 14
-    assert first.baseline_points == 14
+    assert first.baseline_points == 13
     assert first.current_cents == 510
     assert first.deviation_pct == pytest.approx(21.4286, abs=1e-3)
 
 
 def test_band_high_line_names_the_band():
-    history = _rows([420] * 14) + [("2026-09-15", 510, None, "scryfall")]
+    history = _rows([420] * 13) + [
+        ("2026-09-14", 510, None, "scryfall"),
+        ("2026-09-15", 510, None, "scryfall"),
+    ]
     fired = alerts.evaluate(history)
     band = next(a for a in fired if a.rule == "band_high")
     assert band.line == "above 14d band $4.20, mean $4.20 +/- 2 std"
@@ -107,28 +115,37 @@ def test_quiet_inside_band_and_deviation():
 
 
 def test_deviation_and_band_low_can_fire_together():
-    baseline = [400, 440] * 7
+    baseline = [400, 440] * 6 + [400, 300]
     history = _rows(baseline) + [("2026-09-15", 300, None, "scryfall")]
     assert [a.rule for a in alerts.evaluate(history)] == ["avg_deviation", "band_low"]
 
 
 def test_threshold_is_strict():
-    # Exactly 15%: the rule fires on *more than* the threshold, not at it.
-    history = _rows([400] * 14) + [("2026-09-15", 460, None, "scryfall")]
+    # Exactly 15%: the rule fires on *more than* the threshold, not at
+    # it. The move is confirmed twice so the threshold is what is
+    # actually under test, not the glitch guard.
+    history = _rows([400] * 13) + [
+        ("2026-09-14", 460, None, "scryfall"),
+        ("2026-09-15", 460, None, "scryfall"),
+    ]
     fired = alerts.evaluate(history, deviation_pct=15.0)
     assert all(a.rule != "avg_deviation" for a in fired)
 
 
 def test_window_caps_the_baseline():
     baseline = [100] * 5 + [420] * 5
-    history = _rows(baseline, start=1) + [("2026-09-11", 510, None, "scryfall")]
-    narrow = alerts.evaluate(history, window=5)
+    history = (
+        _rows(baseline, start=1)
+        + [("2026-09-11", 510, None, "scryfall")]
+        + [("2026-09-12", 510, None, "scryfall")]
+    )
+    narrow = alerts.evaluate(history, window=6)
     assert narrow[0].rule == "avg_deviation"
     assert narrow[0].baseline_points == 5
-    assert "5d avg $4.20" in narrow[0].line
+    assert "6d avg $4.20" in narrow[0].line
     wide = alerts.evaluate(history, window=10)
     assert wide[0].baseline_points == 10
-    assert "10d avg $2.60" in wide[0].line
+    assert "10d avg $3.01" in wide[0].line
 
 
 def test_custom_deviation_and_band_k():
@@ -152,7 +169,10 @@ def test_thin_history_stays_silent():
 
 
 def test_exactly_five_baseline_points_is_enough():
-    history = _rows([420] * 5) + [("2026-09-06", 510, None, "scryfall")]
+    history = _rows([420] * 5) + [
+        ("2026-09-06", 510, None, "scryfall"),
+        ("2026-09-07", 510, None, "scryfall"),
+    ]
     fired = alerts.evaluate(history)
     assert [a.rule for a in fired] == ["avg_deviation", "band_high"]
     assert fired[0].baseline_points == 5
@@ -167,7 +187,10 @@ def test_tiny_window_still_needs_five_baseline_points():
 
 def test_market_cents_win_over_mid():
     history = [(f"2026-09-{day:02d}", 420, 999, "x") for day in range(1, 6)]
-    history += [("2026-09-06", 510, None, "scryfall")]
+    history += [
+        ("2026-09-06", 510, None, "scryfall"),
+        ("2026-09-07", 510, None, "scryfall"),
+    ]
     fired = alerts.evaluate(history)
     assert [a.rule for a in fired] == ["avg_deviation", "band_high"]
     assert "14d avg $4.20" in fired[0].line
@@ -175,7 +198,10 @@ def test_market_cents_win_over_mid():
 
 def test_mid_cents_are_the_fallback():
     history = [(f"2026-09-{day:02d}", None, 420, "x") for day in range(1, 6)]
-    history += [("2026-09-06", None, 510, "scryfall")]
+    history += [
+        ("2026-09-06", None, 510, "scryfall"),
+        ("2026-09-07", None, 510, "scryfall"),
+    ]
     fired = alerts.evaluate(history)
     assert [a.rule for a in fired] == ["avg_deviation", "band_high"]
     assert "14d avg $4.20" in fired[0].line
@@ -185,12 +211,16 @@ def test_days_without_any_price_are_skipped():
     history = _rows([420] * 5)
     history.insert(2, ("2026-09-03", None, None, "x"))
     history.append(("2026-09-06", 510, None, "scryfall"))
+    history.append(("2026-09-07", 510, None, "scryfall"))
     fired = alerts.evaluate(history)
     assert fired[0].baseline_points == 5
 
 
 def test_zero_mean_baseline_has_no_deviation():
-    history = _rows([0] * 5) + [("2026-09-06", 100, None, "scryfall")]
+    history = _rows([0] * 5) + [
+        ("2026-09-06", 100, None, "scryfall"),
+        ("2026-09-07", 100, None, "scryfall"),
+    ]
     fired = alerts.evaluate(history)
     assert [a.rule for a in fired] == ["band_high"]
     assert fired[0].deviation_pct is None
@@ -198,13 +228,16 @@ def test_zero_mean_baseline_has_no_deviation():
 
 
 def test_smart_alert_to_dict_is_machine_readable():
-    history = _rows([420] * 14) + [("2026-09-15", 510, None, "scryfall")]
+    history = _rows([420] * 13) + [
+        ("2026-09-14", 510, None, "scryfall"),
+        ("2026-09-15", 510, None, "scryfall"),
+    ]
     payload = alerts.evaluate(history)[0].to_dict()
     assert payload == {
         "rule": "avg_deviation",
         "line": "14d avg $4.20, now $5.10 (+21.4%)",
         "window": 14,
-        "baseline_points": 14,
+        "baseline_points": 13,
         "mean_cents": 420.0,
         "current_cents": 510,
         "deviation_pct": pytest.approx(21.43),
@@ -215,17 +248,80 @@ def test_smart_alert_to_dict_is_machine_readable():
 
 
 # ---------------------------------------------------------------------------
+# evaluate: the glitch guard
+
+
+def test_single_snapshot_spike_stays_silent():
+    # One wild print is a suspected glitch until the next snapshot
+    # confirms it: the move has no second consecutive snapshot.
+    history = _rows([420] * 14) + [("2026-09-15", 510, None, "scryfall")]
+    assert alerts.evaluate(history) == []
+
+
+def test_two_snapshot_spike_fires():
+    history = _rows([420] * 13) + [
+        ("2026-09-14", 510, None, "scryfall"),
+        ("2026-09-15", 510, None, "scryfall"),
+    ]
+    assert [a.rule for a in alerts.evaluate(history)] == ["avg_deviation", "band_high"]
+
+
+def test_glitch_in_baseline_does_not_move_the_stats():
+    # A $999.99 bad print in history is cut before the mean is
+    # computed: the confirmed $5.10 move is judged against $4.20, not
+    # against a glitch-inflated average.
+    history = _rows([420] * 13 + [99999]) + [
+        ("2026-09-15", 510, None, "scryfall"),
+        ("2026-09-16", 510, None, "scryfall"),
+    ]
+    fired = alerts.evaluate(history)
+    assert [a.rule for a in fired] == ["avg_deviation", "band_high"]
+    assert fired[0].line == "14d avg $4.20, now $5.10 (+21.4%)"
+    assert fired[0].baseline_points == 12
+
+
+def test_glitch_then_revert_stays_silent():
+    # Yesterday's $999.99 was the glitch; today's $4.30 is back near the
+    # baseline. The move did not persist at the new level, so the smart
+    # rules stay silent.
+    history = _rows([420] * 13 + [99999]) + [("2026-09-15", 430, None, "scryfall")]
+    assert alerts.evaluate(history) == []
+
+
+def test_whipsaw_stays_silent():
+    # Down hard yesterday, up hard today: violent, but not a confirmed
+    # level on either side, so nothing fires.
+    history = _rows([420] * 13) + [
+        ("2026-09-14", 300, None, "scryfall"),
+        ("2026-09-15", 500, None, "scryfall"),
+    ]
+    assert alerts.evaluate(history) == []
+
+
+def test_thin_inlier_baseline_stays_silent():
+    # Four calm snapshots and one glitch: the glitch is cut, leaving
+    # fewer than five trustworthy baseline points, so the rules say
+    # nothing rather than guessing.
+    history = _rows([420] * 4 + [99999]) + [("2026-09-06", 510, None, "scryfall")]
+    assert alerts.evaluate(history) == []
+
+
+# ---------------------------------------------------------------------------
 # check_card: history lookup plus evaluation
 
 
 def test_check_card_reads_backbone_history(cache_home):
     for day in range(1, 6):
         backbone.record_history("mtg", 7, 420, None, "tcgcsv", date=f"2026-09-{day:02d}")
+    # Yesterday already printed $5.10: the live price today is the
+    # second consecutive snapshot, so the glitch guard lets it through.
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    backbone.record_history("mtg", 7, 510, None, "scryfall", date=yesterday)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     backbone.record_history("mtg", 7, 510, None, "scryfall", date=today)
-    fired = alerts.check_card("mtg", 7, window=5)
+    fired = alerts.check_card("mtg", 7, window=6)
     assert [a.rule for a in fired] == ["avg_deviation", "band_high"]
-    assert "5d avg $4.20" in fired[0].line
+    assert "6d avg $4.20" in fired[0].line
 
 
 def test_check_card_thin_history_says_nothing(cache_home):
@@ -295,6 +391,17 @@ def _seed_history(game="mtg", join_key=12345, cents=420, days=14):
         backbone.record_history(game, join_key, cents, None, "tcgcsv", date=date)
 
 
+def _seed_confirmed_spike(game="mtg", join_key=12345, cents=510):
+    """Overwrite yesterday's seed with the spike price.
+
+    The live price the fake network returns today then becomes the
+    second consecutive snapshot, which is what the glitch guard needs
+    before a smart alert fires.
+    """
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    backbone.record_history(game, join_key, cents, None, "scryfall", date=yesterday)
+
+
 @pytest.fixture
 def wide_terminal(monkeypatch):
     """Rich wraps long signal lines at 80 columns; give the table room."""
@@ -308,6 +415,7 @@ def test_check_human_output_shows_smart_alert(
         "data": [_scryfall_card(usd="5.10")]
     }
     _seed_history()
+    _seed_confirmed_spike()
     store = WatchStore()
     store.add("mtg", "scry-1", "Lightning Bolt", "Alpha")
     assert main(["check"]) == 0
@@ -320,6 +428,7 @@ def test_check_json_carries_smart_alerts(cache_home, data_home, fake_net, capsys
         "data": [_scryfall_card(usd="5.10")]
     }
     _seed_history()
+    _seed_confirmed_spike()
     store = WatchStore()
     store.add("mtg", "scry-1", "Lightning Bolt", "Alpha")
     assert main(["--json", "check"]) == 0
@@ -337,6 +446,7 @@ def test_smart_alert_counts_as_alert_for_alert_only(
         "data": [_scryfall_card(usd="5.10")]
     }
     _seed_history()
+    _seed_confirmed_spike()
     store = WatchStore()
     watch = store.add("mtg", "scry-1", "Lightning Bolt", "Alpha")
     # Same as the new price: no spike, no drop, no target. The smart
@@ -378,7 +488,10 @@ def test_window_flag_changes_the_line(cache_home, data_home, fake_net, capsys, w
     fake_net.routes["https://api.scryfall.com/cards/search?q=Lightning%20Bolt"] = lambda: {
         "data": [_scryfall_card(usd="5.10")]
     }
-    _seed_history(days=5)
+    # Six seeded days: the confirming snapshot occupies one baseline
+    # slot and is trimmed as an outlier, leaving five inliers.
+    _seed_history(days=6)
+    _seed_confirmed_spike()
     store = WatchStore()
     store.add("mtg", "scry-1", "Lightning Bolt", "Alpha")
     assert main(["check", "--window", "6"]) == 0
@@ -391,6 +504,7 @@ def test_deviation_flag_tunes_the_threshold(cache_home, data_home, fake_net, cap
         "data": [_scryfall_card(usd="4.50")]
     }
     _seed_history()
+    _seed_confirmed_spike(cents=450)
     store = WatchStore()
     store.add("mtg", "scry-1", "Lightning Bolt", "Alpha")
     # +7.1%: silent at the default 15%, fires at 5%.
@@ -407,9 +521,10 @@ def test_band_k_flag_tunes_the_bands(cache_home, data_home, fake_net, capsys):
         "data": [_scryfall_card(usd="4.50")]
     }
     _seed_history()
+    _seed_confirmed_spike(cents=450)
     store = WatchStore()
     store.add("mtg", "scry-1", "Lightning Bolt", "Alpha")
-    # Zero-width bands: any move is outside the band.
+    # Zero-width bands: any confirmed move is outside the band.
     assert main(["--json", "check", "--band-k", "0"]) == 0
     row = json.loads(capsys.readouterr().out)["rows"][0]
     assert [a["rule"] for a in row["smart_alerts"]] == ["band_high"]
