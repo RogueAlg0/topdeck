@@ -1,5 +1,6 @@
 """Tests for `topdeck completions`: scripts generated from the live parser."""
 
+import shutil
 import subprocess
 
 import pytest
@@ -32,6 +33,8 @@ def test_generate_zsh_has_compdef_and_parses(tmp_path):
     assert "bash zsh fish" in script  # the shell positional's own choices
     path = tmp_path / "_topdeck"
     path.write_text(script)
+    if shutil.which("zsh") is None:
+        pytest.skip("zsh is not installed")
     result = subprocess.run(["zsh", "-n", str(path)], capture_output=True)
     assert result.returncode == 0
 
